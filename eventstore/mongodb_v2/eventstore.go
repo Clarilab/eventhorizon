@@ -398,16 +398,14 @@ func newEvt(ctx context.Context, event eh.Event) (*evt, error) {
 	return e, nil
 }
 
-// collEvents appends the namespace, if one is set, to the Collection to
-// get the name of the Collection to use.
+// collEvents returns a collection. If a custom prefix can be fetched from context that one is used. Otherwise returns default_events collection.
 func (s *EventStore) collEvents(ctx context.Context) *mongo.Collection {
 	ns := eh.NamespaceFromContext(ctx)
 
 	return s.db.Collection(ns + "_events")
 }
 
-// collStreams appends the namespace, if one is set, to the Collection to
-// get the name of the Collection to use.
+// collStreams returns a collection. If a custom prefix can be fetched from context that one is used. Otherwise returns default_streams collection.
 func (s *EventStore) collStreams(ctx context.Context) *mongo.Collection {
 	ns := eh.NamespaceFromContext(ctx)
 
