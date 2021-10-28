@@ -37,9 +37,12 @@ import (
 // collection with one document per aggregate/stream which holds its events
 // as values.
 type EventStore struct {
-	client       *mongo.Client
-	aggregates   *mongo.Collection
-	eventHandler eh.EventHandler
+	useCustomPrefix bool
+	customPrefixes  []string
+	client          *mongo.Client
+	db              *mongo.Database
+	aggregates      *mongo.Collection
+	eventHandler    eh.EventHandler
 }
 
 // NewEventStore creates a new EventStore with a MongoDB URI: `mongodb://hostname`.
@@ -73,6 +76,13 @@ func NewEventStoreWithClient(client *mongo.Client, db string, options ...Option)
 		}
 	}
 
+	ctx := context.Background()
+
+	err := s.createIndices(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	return s, nil
 }
 
@@ -84,6 +94,16 @@ type Option func(*EventStore) error
 func WithEventHandler(h eh.EventHandler) Option {
 	return func(s *EventStore) error {
 		s.eventHandler = h
+		return nil
+	}
+}
+
+// WithCustomCollectionPrefix enables the use of multiple collections in the same db.
+// Collections are being selected on runtime using a context value.
+func WithCustomCollectionPrefix(useCustomPrefix bool, prefixes []string) Option {
+	return func(s *EventStore) error {
+		s.useCustomPrefix = useCustomPrefix
+		s.customPrefixes = prefixes
 		return nil
 	}
 }
@@ -141,7 +161,12 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 		// Increment aggregate version on insert of new event record, and
 		// only insert if version of aggregate is matching (ie not changed
 		// since loading the aggregate).
-		if r, err := s.aggregates.UpdateOne(ctx,
+		eventsCollection := s.aggregates
+		if s.useCustomPrefix {
+			eventsCollection = s.collEvents(ctx)
+		}
+
+		if r, err := eventsCollection.UpdateOne(ctx,
 			bson.M{
 				"_id":     aggregateID,
 				"version": originalVersion,
@@ -181,7 +206,13 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 // Load implements the Load method of the eventhorizon.EventStore interface.
 func (s *EventStore) Load(ctx context.Context, id uuid.UUID) ([]eh.Event, error) {
 	var aggregate aggregateRecord
-	err := s.aggregates.FindOne(ctx, bson.M{"_id": id}).Decode(&aggregate)
+
+	eventsCollection := s.aggregates
+	if s.useCustomPrefix {
+		eventsCollection = s.collEvents(ctx)
+	}
+
+	err := eventsCollection.FindOne(ctx, bson.M{"_id": id}).Decode(&aggregate)
 	if err == mongo.ErrNoDocuments {
 		return []eh.Event{}, nil
 	} else if err != nil {
@@ -278,4 +309,37 @@ func newEvt(ctx context.Context, event eh.Event) (*evt, error) {
 	}
 
 	return e, nil
+}
+
+// collEvents returns a collection. If a custom prefix can be fetched from context that one is used. Otherwise returns default_events collection.
+func (s *EventStore) collEvents(ctx context.Context) *mongo.Collection {
+	ns := eh.NamespaceFromContext(ctx)
+
+	return s.db.Collection(ns + "_events")
+}
+
+// createIndices creates indices.
+func (s *EventStore) createIndices(ctx context.Context) error {
+	if !s.useCustomPrefix {
+		if _, err := s.aggregates.Indexes().CreateOne(ctx, mongo.IndexModel{
+			Keys: bson.M{"_id": 1},
+		}); err != nil {
+			return fmt.Errorf("could not ensure events index: %w", err)
+		}
+
+		return nil
+	}
+
+	for i := range s.customPrefixes {
+		prefix := s.customPrefixes[i]
+		collection := s.db.Collection(prefix + "_events")
+
+		if _, err := collection.Indexes().CreateOne(ctx, mongo.IndexModel{
+			Keys: bson.M{"_id": 1},
+		}); err != nil {
+			return fmt.Errorf("could not ensure events index: %w", err)
+		}
+	}
+
+	return nil
 }

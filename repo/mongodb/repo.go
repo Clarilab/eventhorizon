@@ -49,9 +49,13 @@ var (
 
 // Repo implements an MongoDB repository for entities.
 type Repo struct {
-	client    *mongo.Client
-	entities  *mongo.Collection
-	newEntity func() eh.Entity
+	useCustomPrefix bool
+	customPrefixes  []string
+	collSuffix      string
+	client          *mongo.Client
+	db              *mongo.Database
+	entities        *mongo.Collection
+	newEntity       func() eh.Entity
 }
 
 // NewRepo creates a new Repo.
@@ -75,8 +79,9 @@ func NewRepoWithClient(client *mongo.Client, db, collection string, options ...O
 	}
 
 	r := &Repo{
-		client:   client,
-		entities: client.Database(db).Collection(collection),
+		client:     client,
+		entities:   client.Database(db).Collection(collection),
+		collSuffix: collection,
 	}
 
 	for _, option := range options {
@@ -108,6 +113,16 @@ func IntoRepo(ctx context.Context, repo eh.ReadRepo) *Repo {
 	return IntoRepo(ctx, repo.InnerRepo(ctx))
 }
 
+// WithCustomCollectionPrefix enables the use of multiple collections in the same db.
+// Collections are being selected on runtime using a context value.
+func WithCustomCollectionPrefix(useCustomPrefix bool, prefixes []string) Option {
+	return func(r *Repo) error {
+		r.useCustomPrefix = useCustomPrefix
+		r.customPrefixes = prefixes
+		return nil
+	}
+}
+
 // Find implements the Find method of the eventhorizon.ReadRepo interface.
 func (r *Repo) Find(ctx context.Context, id uuid.UUID) (eh.Entity, error) {
 	if r.newEntity == nil {
@@ -116,8 +131,13 @@ func (r *Repo) Find(ctx context.Context, id uuid.UUID) (eh.Entity, error) {
 		}
 	}
 
+	entitiesCollection := r.entities
+	if r.useCustomPrefix {
+		entitiesCollection = r.collEntities(ctx)
+	}
+
 	entity := r.newEntity()
-	if err := r.entities.FindOne(ctx, bson.M{"_id": id.String()}).Decode(entity); err == mongo.ErrNoDocuments {
+	if err := entitiesCollection.FindOne(ctx, bson.M{"_id": id.String()}).Decode(entity); err == mongo.ErrNoDocuments {
 		return nil, eh.RepoError{
 			Err:     eh.ErrEntityNotFound,
 			BaseErr: err,
@@ -140,7 +160,12 @@ func (r *Repo) FindAll(ctx context.Context) ([]eh.Entity, error) {
 		}
 	}
 
-	cursor, err := r.entities.Find(ctx, bson.M{})
+	entitiesCollection := r.entities
+	if r.useCustomPrefix {
+		entitiesCollection = r.collEntities(ctx)
+	}
+
+	cursor, err := entitiesCollection.Find(ctx, bson.M{})
 	if err != nil {
 		return nil, eh.RepoError{
 			Err:     eh.ErrCouldNotLoadEntity,
@@ -208,7 +233,12 @@ func (r *Repo) FindCustomIter(ctx context.Context, f func(context.Context, *mong
 		}
 	}
 
-	cursor, err := f(ctx, r.entities)
+	entitiesCollection := r.entities
+	if r.useCustomPrefix {
+		entitiesCollection = r.collEntities(ctx)
+	}
+
+	cursor, err := f(ctx, entitiesCollection)
 	if err != nil {
 		return nil, eh.RepoError{
 			Err:     ErrInvalidQuery,
@@ -239,7 +269,12 @@ func (r *Repo) FindCustom(ctx context.Context, f func(context.Context, *mongo.Co
 		}
 	}
 
-	cursor, err := f(ctx, r.entities)
+	entitiesCollection := r.entities
+	if r.useCustomPrefix {
+		entitiesCollection = r.collEntities(ctx)
+	}
+
+	cursor, err := f(ctx, entitiesCollection)
 	if err != nil {
 		return nil, eh.RepoError{
 			Err:     ErrInvalidQuery,
@@ -283,7 +318,12 @@ func (r *Repo) Save(ctx context.Context, entity eh.Entity) error {
 		}
 	}
 
-	if _, err := r.entities.UpdateOne(ctx,
+	entitiesCollection := r.entities
+	if r.useCustomPrefix {
+		entitiesCollection = r.collEntities(ctx)
+	}
+
+	if _, err := entitiesCollection.UpdateOne(ctx,
 		bson.M{
 			"_id": entity.EntityID().String(),
 		},
@@ -302,7 +342,12 @@ func (r *Repo) Save(ctx context.Context, entity eh.Entity) error {
 
 // Remove implements the Remove method of the eventhorizon.WriteRepo interface.
 func (r *Repo) Remove(ctx context.Context, id uuid.UUID) error {
-	if r, err := r.entities.DeleteOne(ctx, bson.M{"_id": id.String()}); err != nil {
+	entitiesCollection := r.entities
+	if r.useCustomPrefix {
+		entitiesCollection = r.collEntities(ctx)
+	}
+
+	if r, err := entitiesCollection.DeleteOne(ctx, bson.M{"_id": id.String()}); err != nil {
 		return eh.RepoError{
 			Err:     eh.ErrCouldNotRemoveEntity,
 			BaseErr: err,
@@ -318,7 +363,12 @@ func (r *Repo) Remove(ctx context.Context, id uuid.UUID) error {
 
 // Collection lets the function do custom actions on the collection.
 func (r *Repo) Collection(ctx context.Context, f func(context.Context, *mongo.Collection) error) error {
-	if err := f(ctx, r.entities); err != nil {
+	entitiesCollection := r.entities
+	if r.useCustomPrefix {
+		entitiesCollection = r.collEntities(ctx)
+	}
+
+	if err := f(ctx, entitiesCollection); err != nil {
 		return eh.RepoError{
 			Err: err,
 		}
@@ -329,11 +379,32 @@ func (r *Repo) Collection(ctx context.Context, f func(context.Context, *mongo.Co
 
 // CreateIndex creates an index for a field.
 func (r *Repo) CreateIndex(ctx context.Context, field string) error {
-	index := mongo.IndexModel{Keys: bson.M{field: 1}}
-	if _, err := r.entities.Indexes().CreateOne(ctx, index); err != nil {
-		return fmt.Errorf("could not create index: %s", err)
+	if !r.useCustomPrefix {
+		index := mongo.IndexModel{Keys: bson.M{field: 1}}
+		if _, err := r.entities.Indexes().CreateOne(ctx, index); err != nil {
+			return fmt.Errorf("could not create index: %s", err)
+		}
+		return nil
 	}
+
+	for i := range r.customPrefixes {
+		prefix := r.customPrefixes[i]
+		collection := r.db.Collection(prefix + r.collSuffix)
+
+		index := mongo.IndexModel{Keys: bson.M{field: 1}}
+		if _, err := collection.Indexes().CreateOne(ctx, index); err != nil {
+			return fmt.Errorf("could not create index: %s", err)
+		}
+	}
+
 	return nil
+}
+
+// collEntities returns a collection. If a custom prefix can be fetched from context that one is used. Otherwise returns default_{collSuffix} collection.
+func (r *Repo) collEntities(ctx context.Context) *mongo.Collection {
+	ns := eh.NamespaceFromContext(ctx)
+
+	return r.db.Collection(ns + r.collSuffix)
 }
 
 // SetEntityFactory sets a factory function that creates concrete entity types.
@@ -343,7 +414,12 @@ func (r *Repo) SetEntityFactory(f func() eh.Entity) {
 
 // Clear clears the read model database.
 func (r *Repo) Clear(ctx context.Context) error {
-	if err := r.entities.Drop(ctx); err != nil {
+	entitiesCollection := r.entities
+	if r.useCustomPrefix {
+		entitiesCollection = r.collEntities(ctx)
+	}
+
+	if err := entitiesCollection.Drop(ctx); err != nil {
 		return eh.RepoError{
 			Err:     ErrCouldNotClearDB,
 			BaseErr: err,

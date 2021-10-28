@@ -35,7 +35,7 @@ import (
 
 // EventStore is an eventhorizon.EventStore for MongoDB, using one collection
 // for all events and another to keep track of all aggregates/streams. It also
-// keep tracks of the global position of events, stored as metadata.
+// keeps track of the global position of events, stored as metadata.
 type EventStore struct {
 	useCustomPrefix bool
 	customPrefixes  []string
@@ -110,9 +110,9 @@ func WithEventHandler(h eh.EventHandler) Option {
 
 // WithCustomCollectionPrefix enables the use of multiple collections in the same db.
 // Collections are being selected on runtime using a context value.
-func WithCustomCollectionPrefix(customCollections bool, prefixes []string) Option {
+func WithCustomCollectionPrefix(useCustomPrefix bool, prefixes []string) Option {
 	return func(s *EventStore) error {
-		s.useCustomPrefix = customCollections
+		s.useCustomPrefix = useCustomPrefix
 		s.customPrefixes = prefixes
 		return nil
 	}
@@ -235,7 +235,7 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 
 		streamsCollection := s.streams
 		if s.useCustomPrefix {
-			streamsCollection = s.collEvents(ctx)
+			streamsCollection = s.collStreams(ctx)
 		}
 
 		// Update the stream.
@@ -452,7 +452,7 @@ func (s *EventStore) ensureAllStream(ctx context.Context) error {
 	return nil
 }
 
-// createIndices creates incides.
+// createIndices creates indices.
 func (s *EventStore) createIndices(ctx context.Context) error {
 	if !s.useCustomPrefix {
 		if _, err := s.events.Indexes().CreateOne(ctx, mongo.IndexModel{
