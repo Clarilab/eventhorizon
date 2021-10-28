@@ -33,6 +33,49 @@ import (
 	"github.com/looplab/eventhorizon/uuid"
 )
 
+func TestReadRepoCustomPrefixIntegration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	// Use MongoDB in Docker with fallback to localhost.
+	addr := os.Getenv("MONGODB_ADDR")
+	if addr == "" {
+		addr = "localhost:27017"
+	}
+	url := "mongodb://" + addr
+
+	// Get a random DB name.
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		t.Fatal(err)
+	}
+	db := "test-" + hex.EncodeToString(b)
+	t.Log("using DB:", db)
+
+	prefixes := []string{"fooPrefix", "barPrefix"}
+	r, err := NewRepo(url, db, "mocks.Model", WithCustomCollectionPrefix(true, prefixes))
+	if err != nil {
+		t.Error("there should be no error:", err)
+	}
+	if r == nil {
+		t.Error("there should be a repository")
+	}
+	defer r.Close(context.Background())
+
+	r.SetEntityFactory(func() eh.Entity {
+		return &mocks.Model{}
+	})
+	if r.InnerRepo(context.Background()) != nil {
+		t.Error("the inner repo should be nil")
+	}
+
+	for _, prefix := range prefixes {
+		repo.AcceptanceTest(t, r, eh.NewContextWithNameSpace(context.Background(), prefix))
+		extraRepoTests(t, r, eh.NewContextWithNameSpace(context.Background(), prefix))
+	}
+}
+
 func TestReadRepoIntegration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
@@ -70,12 +113,10 @@ func TestReadRepoIntegration(t *testing.T) {
 	}
 
 	repo.AcceptanceTest(t, r, context.Background())
-	extraRepoTests(t, r)
+	extraRepoTests(t, r, context.Background())
 }
 
-func extraRepoTests(t *testing.T, r *Repo) {
-	ctx := context.Background()
-
+func extraRepoTests(t *testing.T, r *Repo, ctx context.Context) {
 	// Insert a custom item.
 	modelCustom := &mocks.Model{
 		ID:        uuid.New(),

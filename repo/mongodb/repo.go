@@ -78,9 +78,12 @@ func NewRepoWithClient(client *mongo.Client, db, collection string, options ...O
 		return nil, ErrNoDBClient
 	}
 
+	database := client.Database(db)
+
 	r := &Repo{
 		client:     client,
-		entities:   client.Database(db).Collection(collection),
+		db:         database,
+		entities:   database.Collection(collection),
 		collSuffix: collection,
 	}
 
@@ -404,7 +407,7 @@ func (r *Repo) CreateIndex(ctx context.Context, field string) error {
 func (r *Repo) collEntities(ctx context.Context) *mongo.Collection {
 	ns := eh.NamespaceFromContext(ctx)
 
-	return r.db.Collection(ns + r.collSuffix)
+	return r.db.Collection(ns + "_" + r.collSuffix)
 }
 
 // SetEntityFactory sets a factory function that creates concrete entity types.

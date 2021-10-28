@@ -60,6 +60,42 @@ func TestEventStoreIntegration(t *testing.T) {
 	eventstore.AcceptanceTest(t, store, context.Background())
 }
 
+func TestWithCustomPrefixEventStoreIntegration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	// Use MongoDB in Docker with fallback to localhost.
+	addr := os.Getenv("MONGODB_ADDR")
+	if addr == "" {
+		addr = "localhost:27017"
+	}
+	url := "mongodb://" + addr
+
+	// Get a random DB name.
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		t.Fatal(err)
+	}
+	db := "test-" + hex.EncodeToString(b)
+	t.Log("using DB:", db)
+
+	prefixes := []string{"fooPrefix", "barPrefix"}
+
+	store, err := NewEventStore(url, db, WithCustomCollectionPrefix(true, prefixes))
+	if err != nil {
+		t.Fatal("there should be no error:", err)
+	}
+	if store == nil {
+		t.Fatal("there should be a store")
+	}
+	defer store.Close(context.Background())
+
+	for _, prefix := range []string{"fooPrefix", "barPrefix"} {
+		eventstore.AcceptanceTest(t, store, eh.NewContextWithNameSpace(context.Background(), prefix))
+	}
+}
+
 func TestWithEventHandlerIntegration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")

@@ -65,9 +65,12 @@ func NewEventStoreWithClient(client *mongo.Client, db string, options ...Option)
 		return nil, fmt.Errorf("missing DB client")
 	}
 
+	database := client.Database(db)
+
 	s := &EventStore{
 		client:     client,
-		aggregates: client.Database(db).Collection("events"),
+		db:         database,
+		aggregates: database.Collection("events"),
 	}
 
 	for _, option := range options {
@@ -78,8 +81,7 @@ func NewEventStoreWithClient(client *mongo.Client, db string, options ...Option)
 
 	ctx := context.Background()
 
-	err := s.createIndices(ctx)
-	if err != nil {
+	if err := s.createIndices(ctx); err != nil {
 		return nil, err
 	}
 
@@ -151,7 +153,12 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 			Events:      dbEvents,
 		}
 
-		if _, err := s.aggregates.InsertOne(ctx, aggregate); err != nil {
+		eventsCollection := s.aggregates
+		if s.useCustomPrefix {
+			eventsCollection = s.collEvents(ctx)
+		}
+
+		if _, err := eventsCollection.InsertOne(ctx, aggregate); err != nil {
 			return eh.EventStoreError{
 				Err:     eh.ErrCouldNotSaveEvents,
 				BaseErr: err,

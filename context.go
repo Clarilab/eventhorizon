@@ -37,15 +37,6 @@ const (
 	namespaceKeyStr     = "eh_namespace"
 )
 
-// NamespaceFromContext returns the namespace from the context, or the default
-// namespace.
-func NamespaceFromContext(ctx context.Context) string {
-	if ns, ok := ctx.Value(namespaceKey).(string); ok {
-		return ns
-	}
-	return DefaultNamespace
-}
-
 func init() {
 	RegisterContextMarshaler(func(ctx context.Context, vals map[string]interface{}) {
 		if aggregateID, ok := AggregateIDFromContext(ctx); ok {
@@ -101,6 +92,16 @@ func CommandTypeFromContext(ctx context.Context) (CommandType, bool) {
 	return commandType, ok
 }
 
+// NamespaceFromContext returns the namespace from the context, or the default
+// namespace.
+func NamespaceFromContext(ctx context.Context) string {
+	ns, ok := ctx.Value(namespaceKey).(string)
+	if ok {
+		return ns
+	}
+	return DefaultNamespace
+}
+
 // NewContextWithAggregateID adds a aggregate ID on the context.
 func NewContextWithAggregateID(ctx context.Context, aggregateID uuid.UUID) context.Context {
 	return context.WithValue(ctx, aggregateIDKey, aggregateID)
@@ -114,6 +115,11 @@ func NewContextWithAggregateType(ctx context.Context, aggregateType AggregateTyp
 // NewContextWithCommandType adds a command type on the context.
 func NewContextWithCommandType(ctx context.Context, commandType CommandType) context.Context {
 	return context.WithValue(ctx, commandTypeKey, commandType)
+}
+
+// NewContextWithNameSpace adds a namespace on the context.
+func NewContextWithNameSpace(ctx context.Context, ns string) context.Context {
+	return context.WithValue(ctx, namespaceKey, ns)
 }
 
 // Private context marshaling funcs.
