@@ -34,17 +34,23 @@ type EventBus struct {
 	group        *Group
 	registered   map[eh.EventHandlerType]struct{}
 	registeredMu sync.RWMutex
-	errCh        chan eh.EventBusError
+	errCh        chan error
+	cctx         context.Context
+	cancel       context.CancelFunc
 	wg           sync.WaitGroup
 	codec        eh.EventCodec
 }
 
 // NewEventBus creates a EventBus.
 func NewEventBus(options ...Option) *EventBus {
+	ctx, cancel := context.WithCancel(context.Background())
+
 	b := &EventBus{
 		group:      NewGroup(),
 		registered: map[eh.EventHandlerType]struct{}{},
-		errCh:      make(chan eh.EventBusError, 100),
+		errCh:      make(chan error, 100),
+		cctx:       ctx,
+		cancel:     cancel,
 		codec:      &json.EventCodec{},
 	}
 
@@ -53,6 +59,7 @@ func NewEventBus(options ...Option) *EventBus {
 		if option == nil {
 			continue
 		}
+
 		option(b)
 	}
 
@@ -96,6 +103,7 @@ func (b *EventBus) AddHandler(ctx context.Context, m eh.EventMatcher, h eh.Event
 	if m == nil {
 		return eh.ErrMissingMatcher
 	}
+
 	if h == nil {
 		return eh.ErrMissingHandler
 	}
@@ -103,6 +111,7 @@ func (b *EventBus) AddHandler(ctx context.Context, m eh.EventMatcher, h eh.Event
 	// Check handler existence.
 	b.registeredMu.Lock()
 	defer b.registeredMu.Unlock()
+
 	if _, ok := b.registered[h.HandlerType()]; ok {
 		return eh.ErrHandlerAlreadyAdded
 	}
@@ -115,21 +124,23 @@ func (b *EventBus) AddHandler(ctx context.Context, m eh.EventMatcher, h eh.Event
 	b.registered[h.HandlerType()] = struct{}{}
 
 	// Handle until context is cancelled.
-	b.wg.Add(1)
-	go b.handle(ctx, m, h, ch)
+	go b.handle(m, h, ch)
 
 	return nil
 }
 
 // Errors implements the Errors method of the eventhorizon.EventBus interface.
-func (b *EventBus) Errors() <-chan eh.EventBusError {
+func (b *EventBus) Errors() <-chan error {
 	return b.errCh
 }
 
-// Wait for all channels to close in the event bus group
-func (b *EventBus) Wait() {
+// Close implements the Close method of the eventhorizon.EventBus interface.
+func (b *EventBus) Close() error {
+	b.cancel()
 	b.wg.Wait()
 	b.group.close()
+
+	return nil
 }
 
 type evt struct {
@@ -138,7 +149,8 @@ type evt struct {
 }
 
 // Handles all events coming in on the channel.
-func (b *EventBus) handle(ctx context.Context, m eh.EventMatcher, h eh.EventHandler, ch <-chan []byte) {
+func (b *EventBus) handle(m eh.EventMatcher, h eh.EventHandler, ch <-chan []byte) {
+	b.wg.Add(1)
 	defer b.wg.Done()
 
 	for {
@@ -147,14 +159,15 @@ func (b *EventBus) handle(ctx context.Context, m eh.EventMatcher, h eh.EventHand
 			// Artificial delay to simulate network.
 			time.Sleep(time.Millisecond)
 
-			event, ctx, err := b.codec.UnmarshalEvent(ctx, data)
+			event, ctx, err := b.codec.UnmarshalEvent(b.cctx, data)
 			if err != nil {
 				err = fmt.Errorf("could not unmarshal event: %w", err)
 				select {
-				case b.errCh <- eh.EventBusError{Err: err, Ctx: ctx}:
+				case b.errCh <- &eh.EventBusError{Err: err, Ctx: ctx}:
 				default:
 					log.Printf("eventhorizon: missed error in local event bus: %s", err)
 				}
+
 				return
 			}
 
@@ -167,12 +180,12 @@ func (b *EventBus) handle(ctx context.Context, m eh.EventMatcher, h eh.EventHand
 			if err := h.HandleEvent(ctx, event); err != nil {
 				err = fmt.Errorf("could not handle event (%s): %s", h.HandlerType(), err.Error())
 				select {
-				case b.errCh <- eh.EventBusError{Err: err, Ctx: ctx, Event: event}:
+				case b.errCh <- &eh.EventBusError{Err: err, Ctx: ctx, Event: event}:
 				default:
 					log.Printf("eventhorizon: missed error in local event bus: %s", err)
 				}
 			}
-		case <-ctx.Done():
+		case <-b.cctx.Done():
 			return
 		}
 	}
@@ -201,6 +214,7 @@ func (g *Group) channel(id string) <-chan []byte {
 
 	ch := make(chan []byte, DefaultQueueSize)
 	g.bus[id] = ch
+
 	return ch
 }
 
@@ -227,5 +241,6 @@ func (g *Group) close() {
 	for _, ch := range g.bus {
 		close(ch)
 	}
+
 	g.bus = nil
 }

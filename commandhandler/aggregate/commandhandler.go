@@ -48,6 +48,7 @@ func NewCommandHandler(t eh.AggregateType, store eh.AggregateStore) (*CommandHan
 		t:     t,
 		store: store,
 	}
+
 	return h, nil
 }
 
@@ -67,7 +68,7 @@ func (h *CommandHandler) HandleCommand(ctx context.Context, cmd eh.Command) erro
 	}
 
 	if err = a.HandleCommand(ctx, cmd); err != nil {
-		return eh.AggregateError{Err: err}
+		return &eh.AggregateError{Err: err}
 	}
 
 	return h.store.Save(ctx, a)

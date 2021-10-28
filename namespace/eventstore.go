@@ -17,6 +17,7 @@ package namespace
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	eh "github.com/looplab/eventhorizon"
@@ -66,6 +67,7 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 	if err != nil {
 		return err
 	}
+
 	return store.Save(ctx, events, originalVersion)
 }
 
@@ -75,28 +77,54 @@ func (s *EventStore) Load(ctx context.Context, id uuid.UUID) ([]eh.Event, error)
 	if err != nil {
 		return nil, err
 	}
+
 	return store.Load(ctx, id)
+}
+
+// Close implements the Close method of the eventhorizon.EventStore interface.
+func (s *EventStore) Close() error {
+	s.eventStoresMu.RLock()
+	defer s.eventStoresMu.RUnlock()
+
+	var errStrs []string
+
+	for _, store := range s.eventStores {
+		if err := store.Close(); err != nil {
+			errStrs = append(errStrs, err.Error())
+		}
+	}
+
+	if len(errStrs) > 0 {
+		return fmt.Errorf("multiple errors: %s", strings.Join(errStrs, ", "))
+	}
+
+	return nil
 }
 
 // eventStore is a helper that returns or creates event stores for each namespace.
 func (s *EventStore) eventStore(ctx context.Context) (eh.EventStore, error) {
 	ns := FromContext(ctx)
+
 	s.eventStoresMu.RLock()
 	eventStore, ok := s.eventStores[ns]
 	s.eventStoresMu.RUnlock()
+
 	if !ok {
 		s.eventStoresMu.Lock()
 		// Perform an additional existence check within the write lock in the
 		// unlikely event that someone else added the event store right before us.
 		if _, ok := s.eventStores[ns]; !ok {
 			var err error
+
 			eventStore, err = s.newEventStore(ns)
 			if err != nil {
 				return nil, fmt.Errorf("could not create event store for namespace '%s': %w", ns, err)
 			}
+
 			s.eventStores[ns] = eventStore
 		}
 		s.eventStoresMu.Unlock()
 	}
+
 	return eventStore, nil
 }

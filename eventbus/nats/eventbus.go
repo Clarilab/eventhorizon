@@ -38,18 +38,24 @@ type EventBus struct {
 	connOpts     []nats.Option
 	registered   map[eh.EventHandlerType]struct{}
 	registeredMu sync.RWMutex
-	errCh        chan eh.EventBusError
+	errCh        chan error
+	cctx         context.Context
+	cancel       context.CancelFunc
 	wg           sync.WaitGroup
 	codec        eh.EventCodec
 }
 
 // NewEventBus creates an EventBus, with optional settings.
 func NewEventBus(url, appID string, options ...Option) (*EventBus, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+
 	b := &EventBus{
 		appID:      appID,
 		streamName: appID + "_events",
 		registered: map[eh.EventHandlerType]struct{}{},
-		errCh:      make(chan eh.EventBusError, 100),
+		errCh:      make(chan error, 100),
+		cctx:       ctx,
+		cancel:     cancel,
 		codec:      &json.EventCodec{},
 	}
 
@@ -58,6 +64,7 @@ func NewEventBus(url, appID string, options ...Option) (*EventBus, error) {
 		if option == nil {
 			continue
 		}
+
 		if err := option(b); err != nil {
 			return nil, fmt.Errorf("error while applying option: %w", err)
 		}
@@ -100,6 +107,7 @@ type Option func(*EventBus) error
 func WithCodec(codec eh.EventCodec) Option {
 	return func(b *EventBus) error {
 		b.codec = codec
+
 		return nil
 	}
 }
@@ -108,6 +116,7 @@ func WithCodec(codec eh.EventCodec) Option {
 func WithNATSOptions(opts ...nats.Option) Option {
 	return func(b *EventBus) error {
 		b.connOpts = opts
+
 		return nil
 	}
 }
@@ -137,6 +146,7 @@ func (b *EventBus) AddHandler(ctx context.Context, m eh.EventMatcher, h eh.Event
 	if m == nil {
 		return eh.ErrMissingMatcher
 	}
+
 	if h == nil {
 		return eh.ErrMissingHandler
 	}
@@ -144,6 +154,7 @@ func (b *EventBus) AddHandler(ctx context.Context, m eh.EventMatcher, h eh.Event
 	// Check handler existence.
 	b.registeredMu.Lock()
 	defer b.registeredMu.Unlock()
+
 	if _, ok := b.registered[h.HandlerType()]; ok {
 		return eh.ErrHandlerAlreadyAdded
 	}
@@ -151,7 +162,8 @@ func (b *EventBus) AddHandler(ctx context.Context, m eh.EventMatcher, h eh.Event
 	// Create a consumer.
 	subject := createConsumerSubject(b.streamName, m)
 	consumerName := fmt.Sprintf("%s_%s", b.appID, h.HandlerType())
-	sub, err := b.js.QueueSubscribe(subject, consumerName, b.handler(ctx, m, h),
+
+	sub, err := b.js.QueueSubscribe(subject, consumerName, b.handler(b.cctx, m, h),
 		nats.Durable(consumerName),
 		nats.DeliverNew(),
 		nats.ManualAck(),
@@ -167,33 +179,38 @@ func (b *EventBus) AddHandler(ctx context.Context, m eh.EventMatcher, h eh.Event
 	b.registered[h.HandlerType()] = struct{}{}
 
 	// Handle until context is cancelled.
-	b.wg.Add(1)
-	go b.handle(ctx, sub)
+	go b.handle(sub)
 
 	return nil
 }
 
 // Errors implements the Errors method of the eventhorizon.EventBus interface.
-func (b *EventBus) Errors() <-chan eh.EventBusError {
+func (b *EventBus) Errors() <-chan error {
 	return b.errCh
 }
 
-// Wait for all channels to close in the event bus group
-func (b *EventBus) Wait() {
+// Close implements the Close method of the eventhorizon.EventBus interface.
+func (b *EventBus) Close() error {
+	b.cancel()
 	b.wg.Wait()
+
 	b.conn.Close()
+
+	return nil
 }
 
 // Handles all events coming in on the channel.
-func (b *EventBus) handle(ctx context.Context, sub *nats.Subscription) {
+func (b *EventBus) handle(sub *nats.Subscription) {
+	b.wg.Add(1)
 	defer b.wg.Done()
 
 	for {
 		select {
-		case <-ctx.Done():
-			if ctx.Err() != context.Canceled {
-				log.Printf("eventhorizon: context error in NATS event bus: %s", ctx.Err())
+		case <-b.cctx.Done():
+			if b.cctx.Err() != context.Canceled {
+				log.Printf("eventhorizon: context error in NATS event bus: %s", b.cctx.Err())
 			}
+
 			return
 		}
 	}
@@ -205,17 +222,19 @@ func (b *EventBus) handler(ctx context.Context, m eh.EventMatcher, h eh.EventHan
 		if err != nil {
 			err = fmt.Errorf("could not unmarshal event: %w", err)
 			select {
-			case b.errCh <- eh.EventBusError{Err: err, Ctx: ctx}:
+			case b.errCh <- &eh.EventBusError{Err: err, Ctx: ctx}:
 			default:
 				log.Printf("eventhorizon: missed error in NATS event bus: %s", err)
 			}
 			msg.Nak()
+
 			return
 		}
 
 		// Ignore non-matching events.
 		if !m.Match(event) {
 			msg.AckSync()
+
 			return
 		}
 
@@ -223,11 +242,13 @@ func (b *EventBus) handler(ctx context.Context, m eh.EventMatcher, h eh.EventHan
 		if err := h.HandleEvent(ctx, event); err != nil {
 			err = fmt.Errorf("could not handle event (%s): %w", h.HandlerType(), err)
 			select {
-			case b.errCh <- eh.EventBusError{Err: err, Ctx: ctx, Event: event}:
+			case b.errCh <- &eh.EventBusError{Err: err, Ctx: ctx, Event: event}:
 			default:
 				log.Printf("eventhorizon: missed error in NATS event bus: %s", err)
 			}
+
 			msg.Nak()
+
 			return
 		}
 
@@ -238,6 +259,7 @@ func (b *EventBus) handler(ctx context.Context, m eh.EventMatcher, h eh.EventHan
 func createConsumerSubject(streamName string, m eh.EventMatcher) string {
 	aggregateMatch := "*"
 	eventMatch := "*"
+
 	switch m := m.(type) {
 	case eh.MatchEvents:
 		// Supports only matching one event, otherwise its wildcard.
@@ -249,9 +271,9 @@ func createConsumerSubject(streamName string, m eh.EventMatcher) string {
 		if len(m) == 1 {
 			aggregateMatch = m[0].String()
 		}
-		// case eh.MatchAny:
-		// case eh.MatchAll:
-		// TODO: Support eh.MatchAll in one level with aggregate and event.
 	}
+
+	// TODO: Support eh.MatchAll in one level with aggregate and event.
+
 	return fmt.Sprintf("%s.%s.%s", streamName, aggregateMatch, eventMatch)
 }

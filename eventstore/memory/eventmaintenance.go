@@ -16,6 +16,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 
 	eh "github.com/looplab/eventhorizon"
 	"github.com/looplab/eventhorizon/uuid"
@@ -23,35 +24,58 @@ import (
 
 // Replace implements the Replace method of the eventhorizon.EventStore interface.
 func (s *EventStore) Replace(ctx context.Context, event eh.Event) error {
+	id := event.AggregateID()
+
 	s.dbMu.RLock()
-	aggregate, ok := s.db[event.AggregateID()]
+
+	aggregate, ok := s.db[id]
 	if !ok {
 		s.dbMu.RUnlock()
-		return eh.ErrAggregateNotFound
+
+		return &eh.EventStoreError{
+			Err:         eh.ErrAggregateNotFound,
+			Op:          eh.EventStoreOpReplace,
+			AggregateID: id,
+			Events:      []eh.Event{event},
+		}
 	}
 	s.dbMu.RUnlock()
 
 	// Create the event record for the Database.
 	e, err := copyEvent(ctx, event)
 	if err != nil {
-		return err
+		return &eh.EventStoreError{
+			Err:         fmt.Errorf("could not copy event: %w", err),
+			Op:          eh.EventStoreOpReplace,
+			AggregateID: id,
+			Events:      []eh.Event{event},
+		}
 	}
 
 	// Find the event to replace.
 	idx := -1
+
 	for i, e := range aggregate.Events {
 		if e.Version() == event.Version() {
 			idx = i
+
 			break
 		}
 	}
+
 	if idx == -1 {
-		return eh.ErrInvalidEvent
+		return &eh.EventStoreError{
+			Err:         eh.ErrEventNotFound,
+			Op:          eh.EventStoreOpReplace,
+			AggregateID: id,
+			Events:      []eh.Event{event},
+		}
 	}
 
 	// Replace event.
 	s.dbMu.Lock()
 	defer s.dbMu.Unlock()
+
 	aggregate.Events[idx] = e
 
 	return nil
@@ -63,8 +87,10 @@ func (s *EventStore) RenameEvent(ctx context.Context, from, to eh.EventType) err
 	defer s.dbMu.Unlock()
 
 	updated := map[uuid.UUID]aggregateRecord{}
+
 	for id, aggregate := range s.db {
 		events := make([]eh.Event, len(aggregate.Events))
+
 		for i, e := range aggregate.Events {
 			if e.EventType() == from {
 				// Rename any matching event by duplicating.
@@ -81,7 +107,9 @@ func (s *EventStore) RenameEvent(ctx context.Context, from, to eh.EventType) err
 				)
 			}
 		}
+
 		aggregate.Events = events
+
 		updated[id] = aggregate
 	}
 

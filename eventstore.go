@@ -17,6 +17,8 @@ package eventhorizon
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/looplab/eventhorizon/uuid"
 )
@@ -28,42 +30,99 @@ type EventStore interface {
 
 	// Load loads all events for the aggregate id from the store.
 	Load(context.Context, uuid.UUID) ([]Event, error)
+
+	// Close closes the EventStore.
+	Close() error
 }
+
+var (
+	// Missing events for save operation.
+	ErrMissingEvents = errors.New("missing events")
+	// Events in the same save operation is for different aggregate IDs.
+	ErrMismatchedEventAggregateIDs = errors.New("mismatched event aggregate IDs")
+	// Events in the same save operation is for different aggregate types.
+	ErrMismatchedEventAggregateTypes = errors.New("mismatched event aggregate types")
+	// Events in the same operation have non-serial versions or is not matching the original version.
+	ErrIncorrectEventVersion = errors.New("incorrect event version")
+	// Other events has been saved for this aggregate since the operation started.
+	ErrEventConflictFromOtherSave = errors.New("event conflict from other save")
+	// No matching event could be found (for maintenance operations etc).
+	ErrEventNotFound = errors.New("event not found")
+)
+
+// EventStoreOperation is the operation done when an error happened.
+type EventStoreOperation string
+
+const (
+	// Errors during loading of events.
+	EventStoreOpLoad = "load"
+	// Errors during saving of events.
+	EventStoreOpSave = "save"
+	// Errors during replacing of events.
+	EventStoreOpReplace = "replace"
+	// Errors during renaming of event types.
+	EventStoreOpRename = "rename"
+	// Errors during clearing of the event store.
+	EventStoreOpClear = "clear"
+)
 
 // EventStoreError is an error in the event store.
 type EventStoreError struct {
 	// Err is the error.
 	Err error
-	// BaseErr is an optional underlying error, for example from the DB driver.
-	BaseErr error
+	// Op is the operation for the error.
+	Op EventStoreOperation
+	// AggregateType of related operation.
+	AggregateType AggregateType
+	// AggregateID of related operation.
+	AggregateID uuid.UUID
+	// AggregateVersion of related operation.
+	AggregateVersion int
+	// Events of the related operation.
+	Events []Event
 }
 
 // Error implements the Error method of the errors.Error interface.
-func (e EventStoreError) Error() string {
-	errStr := e.Err.Error()
-	if e.BaseErr != nil {
-		errStr += ": " + e.BaseErr.Error()
+func (e *EventStoreError) Error() string {
+	str := "event store: "
+
+	if e.Op != "" {
+		str += string(e.Op) + ": "
 	}
-	return errStr
+
+	if e.Err != nil {
+		str += e.Err.Error()
+	} else {
+		str += "unknown error"
+	}
+
+	if e.AggregateID != uuid.Nil {
+		at := "Aggregate"
+		if e.AggregateType != "" {
+			at = string(e.AggregateType)
+		}
+
+		str += fmt.Sprintf(", %s(%s, v%d)", at, e.AggregateID, e.AggregateVersion)
+	}
+
+	if len(e.Events) > 0 {
+		var es []string
+		for _, e := range e.Events {
+			es = append(es, e.String())
+		}
+
+		str += " [" + strings.Join(es, ", ") + "]"
+	}
+
+	return str
 }
 
 // Unwrap implements the errors.Unwrap method.
-func (e EventStoreError) Unwrap() error {
+func (e *EventStoreError) Unwrap() error {
 	return e.Err
 }
 
 // Cause implements the github.com/pkg/errors Unwrap method.
-func (e EventStoreError) Cause() error {
+func (e *EventStoreError) Cause() error {
 	return e.Unwrap()
 }
-
-var (
-	// ErrNoEventsToAppend is when no events are available to append.
-	ErrNoEventsToAppend = errors.New("no events to append")
-	// ErrInvalidEvent is when an event does not implement the Event interface.
-	ErrInvalidEvent = errors.New("invalid event")
-	// ErrIncorrectEventVersion is when an event is for an other version of the aggregate.
-	ErrIncorrectEventVersion = errors.New("mismatching event version")
-	// ErrCouldNotSaveEvents is when events could not be saved.
-	ErrCouldNotSaveEvents = errors.New("could not save events")
-)

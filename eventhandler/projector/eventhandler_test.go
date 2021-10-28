@@ -46,19 +46,23 @@ func TestEventHandler_CreateModel(t *testing.T) {
 	entity := &mocks.SimpleModel{
 		ID: id,
 	}
-	repo.LoadErr = eh.RepoError{
+	repo.LoadErr = &eh.RepoError{
 		Err: eh.ErrEntityNotFound,
 	}
 	projector.newEntity = entity
+
 	if err := handler.HandleEvent(ctx, event); err != nil {
 		t.Error("there should be no error:", err)
 	}
+
 	if projector.event != event {
 		t.Error("the handled event should be correct:", projector.event)
 	}
+
 	if !reflect.DeepEqual(projector.entity, &mocks.SimpleModel{}) {
 		t.Error("the entity should be correct:", projector.entity)
 	}
+
 	if repo.Entity != projector.newEntity {
 		t.Error("the new entity should be correct:", repo.Entity)
 	}
@@ -87,15 +91,19 @@ func TestEventHandler_UpdateModel(t *testing.T) {
 		ID:      id,
 		Content: "updated",
 	}
+
 	if err := handler.HandleEvent(ctx, event); err != nil {
 		t.Error("there should be no error:", err)
 	}
+
 	if projector.event != event {
 		t.Error("the handled event should be correct:", projector.event)
 	}
+
 	if projector.entity != entity {
 		t.Error("the entity should be correct:", projector.entity)
 	}
+
 	if repo.Entity != projector.newEntity {
 		t.Error("the new entity should be correct:", repo.Entity)
 	}
@@ -130,15 +138,19 @@ func TestEventHandler_UpdateModelWithVersion(t *testing.T) {
 		Version: 1,
 		Content: "version 1",
 	}
+
 	if err := handler.HandleEvent(ctx, event); err != nil {
 		t.Error("there should be no error:", err)
 	}
+
 	if projector.event != event {
 		t.Error("the handled event should be correct:", projector.event)
 	}
+
 	if projector.entity != entity {
 		t.Error("the entity should be correct:", projector.entity)
 	}
+
 	if repo.Entity != projector.newEntity {
 		t.Error("the new entity should be correct:", repo.Entity)
 	}
@@ -151,14 +163,11 @@ func TestEventHandler_UpdateModelWithVersion(t *testing.T) {
 	// Handling a future event with a gap in versions should produce an error.
 	futureEvent := eh.NewEvent(mocks.EventType, eventData, timestamp,
 		eh.ForAggregate(mocks.AggregateType, id, 8))
-	expectedErr := Error{
-		Err:           eh.ErrIncorrectEntityVersion,
-		Projector:     TestProjectorType.String(),
-		EventVersion:  8,
-		EntityVersion: 1,
-	}
+	errType := &Error{}
+
 	err := handler.HandleEvent(ctx, futureEvent)
-	if !errors.Is(err, expectedErr) {
+	if !errors.As(err, &errType) || !errors.Is(err, eh.ErrIncorrectEntityVersion) {
+		// if err != expectedErr {
 		t.Error("there should be an error:", err)
 	}
 
@@ -170,14 +179,10 @@ func TestEventHandler_UpdateModelWithVersion(t *testing.T) {
 		Version: 3,
 		Content: "version 1",
 	}
-	expectedErr = Error{
-		Err:           eh.ErrIncorrectEntityVersion,
-		Projector:     TestProjectorType.String(),
-		EventVersion:  2,
-		EntityVersion: 3,
-	}
+	errType = &Error{}
+
 	err = handler.HandleEvent(ctx, nextEvent)
-	if !errors.Is(err, expectedErr) {
+	if !errors.As(err, &errType) || !errors.Is(err, ErrIncorrectProjectedEntityVersion) {
 		t.Error("there should be an error:", err)
 	}
 
@@ -193,6 +198,7 @@ func TestEventHandler_UpdateModelWithVersion(t *testing.T) {
 		Version: 8,
 		Content: "version 1",
 	}
+
 	if err := handler.HandleEvent(ctx, futureEvent); err != nil {
 		t.Error("there should be no error:", err)
 	}
@@ -231,21 +237,85 @@ func TestEventHandler_UpdateModelWithEventsOutOfOrder(t *testing.T) {
 		Version: 3,
 		Content: "version 3",
 	}
+
 	go func() {
 		<-time.After(100 * time.Millisecond)
 		repo.Lock()
 		repo.Entity = newEntity
 		repo.Unlock()
 	}()
+
 	if err := handler.HandleEvent(ctx, event); err != nil {
 		t.Error("there should be no error:", err)
 	}
+
 	if projector.event != event {
 		t.Error("the handled event should be correct:", projector.event)
 	}
+
 	if projector.entity != newEntity {
 		t.Error("the entity should be correct:", projector.entity)
 	}
+
+	if repo.Entity != projector.newEntity {
+		t.Error("the new entity should be correct:", repo.Entity)
+	}
+}
+
+func TestEventHandler_UpdateModelWithRetryOnce(t *testing.T) {
+	repo := &mocks.Repo{}
+	projector := &TestProjector{}
+	// Out of order events requires waiting, at least if the event bus doesn't
+	// support retries.
+	handler := NewEventHandler(projector, version.NewRepo(repo), WithRetryOnce())
+	handler.SetEntityFactory(func() eh.Entity {
+		return &mocks.Model{}
+	})
+
+	ctx := context.Background()
+
+	id := uuid.New()
+	eventData := &mocks.EventData{Content: "event1"}
+	timestamp := time.Date(2009, time.November, 10, 23, 0, 0, 0, time.UTC)
+	event := eh.NewEvent(mocks.EventType, eventData, timestamp,
+		eh.ForAggregate(mocks.AggregateType, id, 3))
+	entity := &mocks.Model{
+		ID:      id,
+		Version: 1,
+		Content: "version 1",
+	}
+	newEntity := &mocks.Model{
+		ID:      id,
+		Version: 2,
+		Content: "version 2",
+	}
+	repo.Entity = entity
+	projector.newEntity = &mocks.Model{
+		ID:      id,
+		Version: 3,
+		Content: "version 3",
+	}
+
+	go func() {
+		// Replace the entity after the first load.
+		<-time.After(50 * time.Millisecond)
+		repo.Lock()
+		repo.Entity = newEntity
+		repo.Unlock()
+	}()
+
+	if err := handler.HandleEvent(ctx, event); err != nil {
+		t.Error("there should be no error:", err)
+	}
+
+	if projector.event != event {
+		t.Error("the handled event should be correct:", projector.event)
+	}
+
+	if projector.entity != newEntity {
+		t.Error("the entity should be correct:", projector.entity)
+	}
+
 	if repo.Entity != projector.newEntity {
 		t.Error("the new entity should be correct:", repo.Entity)
 	}
@@ -271,15 +341,19 @@ func TestEventHandler_DeleteModel(t *testing.T) {
 	}
 	repo.Entity = entity
 	projector.newEntity = nil
+
 	if err := handler.HandleEvent(ctx, event); err != nil {
 		t.Error("there should be no error:", err)
 	}
+
 	if projector.event != event {
 		t.Error("the handled event should be correct:", projector.event)
 	}
+
 	if projector.entity != entity {
 		t.Error("the entity should be correct:", projector.entity)
 	}
+
 	if repo.Entity != projector.newEntity {
 		t.Error("the new entity should be correct:", repo.Entity)
 	}
@@ -303,13 +377,11 @@ func TestEventHandler_LoadError(t *testing.T) {
 		eh.ForAggregate(mocks.AggregateType, id, 1))
 	loadErr := errors.New("load error")
 	repo.LoadErr = loadErr
-	expectedErr := Error{
-		Err:          loadErr,
-		Projector:    TestProjectorType.String(),
-		EventVersion: 1,
-	}
+
 	err := handler.HandleEvent(ctx, event)
-	if !errors.Is(err, expectedErr) {
+
+	projectError := &Error{}
+	if !errors.As(err, &projectError) || !errors.Is(err, loadErr) {
 		t.Error("there should be an error:", err)
 	}
 }
@@ -332,13 +404,11 @@ func TestEventHandler_SaveError(t *testing.T) {
 		eh.ForAggregate(mocks.AggregateType, id, 1))
 	saveErr := errors.New("save error")
 	repo.SaveErr = saveErr
-	expectedErr := Error{
-		Err:          saveErr,
-		Projector:    TestProjectorType.String(),
-		EventVersion: 1,
-	}
+
 	err := handler.HandleEvent(ctx, event)
-	if !errors.Is(err, expectedErr) {
+
+	projectError := &Error{}
+	if !errors.As(err, &projectError) || !errors.Is(err, saveErr) {
 		t.Error("there should be an error:", err)
 	}
 }
@@ -361,13 +431,11 @@ func TestEventHandler_ProjectError(t *testing.T) {
 		eh.ForAggregate(mocks.AggregateType, id, 1))
 	projectErr := errors.New("save error")
 	projector.err = projectErr
-	expectedErr := Error{
-		Err:          projectErr,
-		Projector:    TestProjectorType.String(),
-		EventVersion: 1,
-	}
+
 	err := handler.HandleEvent(ctx, event)
-	if !errors.Is(err, expectedErr) {
+
+	projectError := &Error{}
+	if !errors.As(err, &projectError) || !errors.Is(err, projectErr) {
 		t.Error("there should be an error:", err)
 	}
 }
@@ -377,7 +445,11 @@ func TestEventHandler_EntityLookup(t *testing.T) {
 	projector := &TestProjector{}
 	handler := NewEventHandler(projector, repo,
 		WithEntityLookup(func(event eh.Event) uuid.UUID {
-			eventData := event.Data().(*mocks.EventData)
+			eventData, ok := event.Data().(*mocks.EventData)
+			if !ok {
+				return uuid.Nil
+			}
+
 			return uuid.MustParse(eventData.Content)
 		}),
 	)
@@ -401,15 +473,19 @@ func TestEventHandler_EntityLookup(t *testing.T) {
 		ID:      entityID,
 		Content: "updated",
 	}
+
 	if err := handler.HandleEvent(ctx, event); err != nil {
 		t.Error("there should be no error:", err)
 	}
+
 	if projector.event != event {
 		t.Error("the handled event should be correct:", projector.event)
 	}
+
 	if projector.entity != entity {
 		t.Error("the entity should be correct:", projector.entity)
 	}
+
 	if repo.Entity != projector.newEntity {
 		t.Error("the new entity should be correct:", repo.Entity)
 	}
@@ -435,8 +511,10 @@ func (m *TestProjector) Project(ctx context.Context, event eh.Event, entity eh.E
 	if m.err != nil {
 		return nil, m.err
 	}
+
 	m.context = ctx
 	m.event = event
 	m.entity = entity
+
 	return m.newEntity, nil
 }

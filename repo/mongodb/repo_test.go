@@ -61,7 +61,7 @@ func TestReadRepoCustomPrefixIntegration(t *testing.T) {
 	if r == nil {
 		t.Error("there should be a repository")
 	}
-	defer r.Close(context.Background())
+	defer r.Close()
 
 	r.SetEntityFactory(func() eh.Entity {
 		return &mocks.Model{}
@@ -86,6 +86,7 @@ func TestReadRepoIntegration(t *testing.T) {
 	if addr == "" {
 		addr = "localhost:27017"
 	}
+
 	url := "mongodb://" + addr
 
 	// Get a random DB name.
@@ -93,21 +94,26 @@ func TestReadRepoIntegration(t *testing.T) {
 	if _, err := rand.Read(b); err != nil {
 		t.Fatal(err)
 	}
+
 	db := "test-" + hex.EncodeToString(b)
+
 	t.Log("using DB:", db)
 
 	r, err := NewRepo(url, db, "mocks.Model")
 	if err != nil {
 		t.Error("there should be no error:", err)
 	}
+
 	if r == nil {
 		t.Error("there should be a repository")
 	}
-	defer r.Close(context.Background())
+
+	defer r.Close()
 
 	r.SetEntityFactory(func() eh.Entity {
 		return &mocks.Model{}
 	})
+
 	if r.InnerRepo(context.Background()) != nil {
 		t.Error("the inner repo should be nil")
 	}
@@ -134,21 +140,25 @@ func extraRepoTests(t *testing.T, r *Repo, ctx context.Context) {
 	if len(result) != 1 {
 		t.Error("there should be one item:", len(result))
 	}
+
 	if !reflect.DeepEqual(result[0], modelCustom) {
 		t.Error("the item should be correct:", modelCustom)
 	}
 
 	// FindCustom with no query.
-	result, err = r.FindCustom(ctx, func(ctx context.Context, c *mongo.Collection) (*mongo.Cursor, error) {
+	repoErr := &eh.RepoError{}
+
+	_, err = r.FindCustom(ctx, func(ctx context.Context, c *mongo.Collection) (*mongo.Cursor, error) {
 		return nil, nil
 	})
-	var repoErr eh.RepoError
-	if !errors.As(err, &repoErr) || !errors.Is(err, ErrInvalidQuery) {
+	if !errors.As(err, &repoErr) || repoErr.Err.Error() != "no cursor" {
 		t.Error("there should be a invalid query error:", err)
 	}
 
 	var count int64
 	// FindCustom with query execution in the callback.
+	repoErr = &eh.RepoError{}
+
 	_, err = r.FindCustom(ctx, func(ctx context.Context, c *mongo.Collection) (*mongo.Cursor, error) {
 		if count, err = c.CountDocuments(ctx, bson.M{}); err != nil {
 			t.Error("there should be no error:", err)
@@ -157,9 +167,10 @@ func extraRepoTests(t *testing.T, r *Repo, ctx context.Context) {
 		// Be sure to return nil to not execute the query again in FindCustom.
 		return nil, nil
 	})
-	if !errors.As(err, &repoErr) || !errors.Is(err, ErrInvalidQuery) {
+	if !errors.As(err, &repoErr) || repoErr.Err.Error() != "no cursor" {
 		t.Error("there should be a invalid query error:", err)
 	}
+
 	if count != 2 {
 		t.Error("the count should be correct:", count)
 	}
@@ -168,16 +179,20 @@ func extraRepoTests(t *testing.T, r *Repo, ctx context.Context) {
 		ID:      uuid.New(),
 		Content: "modelCustom2",
 	}
+
 	if err := r.Collection(ctx, func(ctx context.Context, c *mongo.Collection) error {
 		_, err := c.InsertOne(ctx, modelCustom2)
+
 		return err
 	}); err != nil {
 		t.Error("there should be no error:", err)
 	}
+
 	model, err := r.Find(ctx, modelCustom2.ID)
 	if err != nil {
 		t.Error("there should be no error:", err)
 	}
+
 	if !reflect.DeepEqual(model, modelCustom2) {
 		t.Error("the item should be correct:", model)
 	}
@@ -193,19 +208,26 @@ func extraRepoTests(t *testing.T, r *Repo, ctx context.Context) {
 	if iter.Next(ctx) != true {
 		t.Error("the iterator should have results")
 	}
+
 	if !reflect.DeepEqual(iter.Value(), modelCustom) {
 		t.Error("the item should be correct:", modelCustom)
 	}
+
 	if iter.Next(ctx) == true {
 		t.Error("the iterator should have no results")
 	}
+
 	err = iter.Close(ctx)
 	if err != nil {
 		t.Error("there should be no error:", err)
 	}
 }
 
-func TestIntoRepo(t *testing.T) {
+func TestIntoRepoIntegration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
 	if r := IntoRepo(context.Background(), nil); r != nil {
 		t.Error("the repository should be nil:", r)
 	}
@@ -220,6 +242,7 @@ func TestIntoRepo(t *testing.T) {
 	if addr == "" {
 		addr = "localhost:27017"
 	}
+
 	url := "mongodb://" + addr
 
 	// Get a random DB name.
@@ -227,14 +250,16 @@ func TestIntoRepo(t *testing.T) {
 	if _, err := rand.Read(b); err != nil {
 		t.Fatal(err)
 	}
+
 	db := "test-" + hex.EncodeToString(b)
+
 	t.Log("using DB:", db)
 
 	inner, err := NewRepo(url, db, "mocks.Model")
 	if err != nil {
 		t.Error("there should be no error:", err)
 	}
-	defer inner.Close(context.Background())
+	defer inner.Close()
 
 	outer := &mocks.Repo{ParentRepo: inner}
 	if r := IntoRepo(context.Background(), outer); r != inner {
