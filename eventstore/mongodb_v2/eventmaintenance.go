@@ -50,10 +50,7 @@ func (s *EventStore) Replace(ctx context.Context, event eh.Event) error {
 	if _, err := sess.WithTransaction(ctx, func(txCtx mongo.SessionContext) (interface{}, error) {
 		// First check if the aggregate exists, the not found error in the update
 		// query can mean both that the aggregate or the event is not found.
-		eventsCollection := s.events
-		if s.useCustomPrefix {
-			eventsCollection = s.collEvents(ctx)
-		}
+		eventsCollection := s.collEvents(ctx)
 
 		if n, err := eventsCollection.CountDocuments(ctx,
 			bson.M{"aggregate_id": id}); n == 0 {
@@ -117,12 +114,7 @@ func (s *EventStore) Replace(ctx context.Context, event eh.Event) error {
 func (s *EventStore) RenameEvent(ctx context.Context, from, to eh.EventType) error {
 	// Find and rename all events.
 	// TODO: Maybe use change info.
-	eventsCollection := s.events
-	if s.useCustomPrefix {
-		eventsCollection = s.collEvents(ctx)
-	}
-
-	if _, err := eventsCollection.UpdateMany(ctx,
+	if _, err := s.collEvents(ctx).UpdateMany(ctx,
 		bson.M{
 			"event_type": from.String(),
 		},
@@ -141,23 +133,13 @@ func (s *EventStore) RenameEvent(ctx context.Context, from, to eh.EventType) err
 
 // Clear clears the event storage.
 func (s *EventStore) Clear(ctx context.Context) error {
-	eventsCollection := s.events
-	if s.useCustomPrefix {
-		eventsCollection = s.collEvents(ctx)
-	}
-
-	if err := eventsCollection.Drop(ctx); err != nil {
+	if err := s.collEvents(ctx).Drop(ctx); err != nil {
 		return &eh.EventStoreError{
 			Err: fmt.Errorf("could not clear events collection: %w", err),
 		}
 	}
 
-	streamsCollection := s.streams
-	if s.useCustomPrefix {
-		streamsCollection = s.collStreams(ctx)
-	}
-
-	if err := streamsCollection.Drop(ctx); err != nil {
+	if err := s.collStreams(ctx).Drop(ctx); err != nil {
 		return &eh.EventStoreError{
 			Err: fmt.Errorf("could not clear streams collection: %w", err),
 		}

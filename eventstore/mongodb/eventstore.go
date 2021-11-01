@@ -191,12 +191,7 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 			Events:      dbEvents,
 		}
 
-		eventsCollection := s.aggregates
-		if s.useCustomPrefix {
-			eventsCollection = s.collEvents(ctx)
-		}
-
-		if _, err := eventsCollection.InsertOne(ctx, aggregate); err != nil {
+		if _, err := s.collEvents(ctx).InsertOne(ctx, aggregate); err != nil {
 			return &eh.EventStoreError{
 				Err:              fmt.Errorf("could not insert: %w", err),
 				Op:               eh.EventStoreOpSave,
@@ -210,12 +205,7 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 		// Increment aggregate version on insert of new event record, and
 		// only insert if version of aggregate is matching (ie not changed
 		// since loading the aggregate).
-		eventsCollection := s.aggregates
-		if s.useCustomPrefix {
-			eventsCollection = s.collEvents(ctx)
-		}
-
-		if r, err := eventsCollection.UpdateOne(ctx,
+		if r, err := s.collEvents(ctx).UpdateOne(ctx,
 			bson.M{
 				"_id":     id,
 				"version": originalVersion,
@@ -263,12 +253,8 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 // Load implements the Load method of the eventhorizon.EventStore interface.
 func (s *EventStore) Load(ctx context.Context, id uuid.UUID) ([]eh.Event, error) {
 	var aggregate aggregateRecord
-	eventsCollection := s.aggregates
-	if s.useCustomPrefix {
-		eventsCollection = s.collEvents(ctx)
-	}
 
-	if err := eventsCollection.FindOne(ctx, bson.M{"_id": id}).Decode(&aggregate); err != nil {
+	if err := s.collEvents(ctx).FindOne(ctx, bson.M{"_id": id}).Decode(&aggregate); err != nil {
 		// Translate to our own not found error.
 		if err == mongo.ErrNoDocuments {
 			err = eh.ErrAggregateNotFound
@@ -381,8 +367,13 @@ func newEvt(ctx context.Context, event eh.Event) (*evt, error) {
 	return e, nil
 }
 
-// collEvents returns a collection. If a custom prefix can be fetched from context that one is used. Otherwise returns default_events collection.
+// collEvents returns a collection. Uses standard events collection if useCustomPrefix is set to false.
+// If a custom prefix can be fetched from context that one is used. Otherwise returns default_events collection.
 func (s *EventStore) collEvents(ctx context.Context) *mongo.Collection {
+	if !s.useCustomPrefix {
+		return s.aggregates
+	}
+
 	ns := eh.NamespaceFromContext(ctx)
 
 	return s.db.Collection(ns + "_events")

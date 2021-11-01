@@ -34,10 +34,7 @@ func (s *EventStore) Replace(ctx context.Context, event eh.Event) error {
 
 	// First check if the aggregate exists, the not found error in the update
 	// query can mean both that the aggregate or the event is not found.
-	eventsCollection := s.aggregates
-	if s.useCustomPrefix {
-		eventsCollection = s.collEvents(ctx)
-	}
+	eventsCollection := s.collEvents(ctx)
 
 	if n, err := eventsCollection.CountDocuments(ctx, bson.M{"_id": event.AggregateID()}); n == 0 {
 		return &eh.EventStoreError{
@@ -66,7 +63,7 @@ func (s *EventStore) Replace(ctx context.Context, event eh.Event) error {
 	}
 
 	// Find and replace the event.
-	if r, err := s.aggregates.UpdateOne(ctx,
+	if r, err := eventsCollection.UpdateOne(ctx,
 		bson.M{
 			"_id":            event.AggregateID(),
 			"events.version": event.Version(),
@@ -101,12 +98,7 @@ func (s *EventStore) Replace(ctx context.Context, event eh.Event) error {
 func (s *EventStore) RenameEvent(ctx context.Context, from, to eh.EventType) error {
 	// Find and rename all events.
 	// TODO: Maybe use change info.
-	eventsCollection := s.aggregates
-	if s.useCustomPrefix {
-		eventsCollection = s.collEvents(ctx)
-	}
-
-	if _, err := eventsCollection.UpdateMany(ctx,
+	if _, err := s.collEvents(ctx).UpdateMany(ctx,
 		bson.M{
 			"events.event_type": from.String(),
 		},
@@ -125,12 +117,7 @@ func (s *EventStore) RenameEvent(ctx context.Context, from, to eh.EventType) err
 
 // Clear clears the event storage.
 func (s *EventStore) Clear(ctx context.Context) error {
-	eventsCollection := s.aggregates
-	if s.useCustomPrefix {
-		eventsCollection = s.collEvents(ctx)
-	}
-
-	if err := eventsCollection.Drop(ctx); err != nil {
+	if err := s.collEvents(ctx).Drop(ctx); err != nil {
 		return &eh.EventStoreError{
 			Err: err,
 			Op:  eh.EventStoreOpRename,

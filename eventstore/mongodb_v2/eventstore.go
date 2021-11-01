@@ -200,12 +200,7 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 
 	if _, err := sess.WithTransaction(ctx, func(txCtx mongo.SessionContext) (interface{}, error) {
 		// Fetch and increment global version in the all-stream.
-		streams := s.streams
-		if s.useCustomPrefix {
-			streams = s.collStreams(ctx)
-		}
-
-		r := streams.FindOneAndUpdate(txCtx,
+		r := s.collStreams(ctx).FindOneAndUpdate(txCtx,
 			bson.M{"_id": "$all"},
 			bson.M{"$inc": bson.M{"position": len(dbEvents)}},
 		)
@@ -246,12 +241,7 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 		}
 
 		// Store events.
-		eventsCollection := s.events
-		if s.useCustomPrefix {
-			eventsCollection = s.collEvents(ctx)
-		}
-
-		insert, err := eventsCollection.InsertMany(txCtx, dbEvents)
+		insert, err := s.collEvents(ctx).InsertMany(txCtx, dbEvents)
 		if err != nil {
 			return nil, fmt.Errorf("could not insert events: %w", err)
 		}
@@ -279,18 +269,13 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 			}
 		}
 
-		streamsCollection := s.streams
-		if s.useCustomPrefix {
-			streamsCollection = s.collStreams(ctx)
-		}
-
 		// Update the stream.
 		if originalVersion == 0 {
-			if _, err := streamsCollection.InsertOne(txCtx, strm); err != nil {
+			if _, err := s.collStreams(ctx).InsertOne(txCtx, strm); err != nil {
 				return nil, fmt.Errorf("could not insert stream: %w", err)
 			}
 		} else {
-			if r, err := streamsCollection.UpdateOne(txCtx,
+			if r, err := s.collStreams(ctx).UpdateOne(txCtx,
 				bson.M{
 					"_id":     strm.ID,
 					"version": originalVersion,
@@ -338,12 +323,7 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 
 // Load implements the Load method of the eventhorizon.EventStore interface.
 func (s *EventStore) Load(ctx context.Context, id uuid.UUID) ([]eh.Event, error) {
-	eventsCollection := s.events
-	if s.useCustomPrefix {
-		eventsCollection = s.collEvents(ctx)
-	}
-
-	cursor, err := eventsCollection.Find(ctx, bson.M{"aggregate_id": id})
+	cursor, err := s.collEvents(ctx).Find(ctx, bson.M{"aggregate_id": id})
 	if err != nil {
 		return nil, &eh.EventStoreError{
 			Err:         fmt.Errorf("could not find event: %w", err),
@@ -476,15 +456,25 @@ func newEvt(ctx context.Context, event eh.Event) (*evt, error) {
 	return e, nil
 }
 
-// collEvents returns a collection. If a custom prefix can be fetched from context that one is used. Otherwise returns default_events collection.
+// collEvents returns a collection. Uses standard events collection if useCustomPrefix is set to false.
+// If a custom prefix can be fetched from context that one is used. Otherwise returns default_events collection.
 func (s *EventStore) collEvents(ctx context.Context) *mongo.Collection {
+	if !s.useCustomPrefix {
+		return s.events
+	}
+
 	ns := eh.NamespaceFromContext(ctx)
 
 	return s.db.Collection(ns + "_events")
 }
 
-// collStreams returns a collection. If a custom prefix can be fetched from context that one is used. Otherwise returns default_streams collection.
+// collStreams returns a collection.  Uses standard streams collection if useCustomPrefix is set to false.
+// If a custom prefix can be fetched from context that one is used. Otherwise returns default_streams collection.
 func (s *EventStore) collStreams(ctx context.Context) *mongo.Collection {
+	if !s.useCustomPrefix {
+		return s.streams
+	}
+
 	ns := eh.NamespaceFromContext(ctx)
 
 	return s.db.Collection(ns + "_streams")
