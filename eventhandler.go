@@ -16,7 +16,6 @@ package eventhorizon
 
 import (
 	"context"
-	"fmt"
 	"reflect"
 	"runtime"
 	"strings"
@@ -51,17 +50,18 @@ func (f EventHandlerFunc) HandleEvent(ctx context.Context, e Event) error {
 
 // HandlerType implements the HandlerType method of the EventHandler by returning
 // the name of the package and function:
-// "github.com/looplab/eventhorizon.Function" becomes "eventhorizon-Function"
+// "github.com/looplab/eventhorizon.Function" becomes "eventhorizon-Function".
 func (f EventHandlerFunc) HandlerType() EventHandlerType {
 	fullName := runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() // Extract full func name: github.com/...
 	parts := strings.Split(fullName, "/")                              // Split URL.
 	name := parts[len(parts)-1]                                        // Take only the last part: package.Function.
-	return EventHandlerType(strings.ReplaceAll(name, ".", "-"))        // Use - as separator.
+
+	return EventHandlerType(strings.ReplaceAll(name, ".", "-")) // Use - as separator.
 }
 
-// CouldNotHandleEventError is an error returned when an event could not be
+// EventHandlerError is an error returned when an event could not be
 // handled by an event handler.
-type CouldNotHandleEventError struct {
+type EventHandlerError struct {
 	// Err is the error.
 	Err error
 	// Event is the event that failed to be handled.
@@ -69,20 +69,28 @@ type CouldNotHandleEventError struct {
 }
 
 // Error implements the Error method of the errors.Error interface.
-func (e CouldNotHandleEventError) Error() string {
-	eventStr := ""
-	if e.Event != nil {
-		eventStr += " '" + e.Event.String() + "'"
+func (e *EventHandlerError) Error() string {
+	str := "could not handle event: "
+
+	if e.Err != nil {
+		str += e.Err.Error()
+	} else {
+		str += "unknown error"
 	}
-	return fmt.Sprintf("could not handle event%s: %s", eventStr, e.Err)
+
+	if e.Event != nil {
+		str += ", " + e.Event.String()
+	}
+
+	return str
 }
 
 // Unwrap implements the errors.Unwrap method.
-func (e CouldNotHandleEventError) Unwrap() error {
+func (e *EventHandlerError) Unwrap() error {
 	return e.Err
 }
 
 // Cause implements the github.com/pkg/errors Unwrap method.
-func (e CouldNotHandleEventError) Cause() error {
+func (e *EventHandlerError) Cause() error {
 	return e.Unwrap()
 }

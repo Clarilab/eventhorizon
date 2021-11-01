@@ -17,6 +17,7 @@ package namespace
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	eh "github.com/looplab/eventhorizon"
@@ -73,6 +74,7 @@ func (r *Repo) InnerRepo(ctx context.Context) eh.ReadRepo {
 		// TODO: Log/handle error.
 		return nil
 	}
+
 	return repo
 }
 
@@ -82,9 +84,11 @@ func IntoRepo(ctx context.Context, repo eh.ReadRepo) *Repo {
 	if repo == nil {
 		return nil
 	}
+
 	if r, ok := repo.(*Repo); ok {
 		return r
 	}
+
 	return IntoRepo(ctx, repo.InnerRepo(ctx))
 }
 
@@ -94,6 +98,7 @@ func (r *Repo) Find(ctx context.Context, id uuid.UUID) (eh.Entity, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return repo.Find(ctx, id)
 }
 
@@ -103,6 +108,7 @@ func (r *Repo) FindAll(ctx context.Context) ([]eh.Entity, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return repo.FindAll(ctx)
 }
 
@@ -112,6 +118,7 @@ func (r *Repo) Save(ctx context.Context, entity eh.Entity) error {
 	if err != nil {
 		return err
 	}
+
 	return repo.Save(ctx, entity)
 }
 
@@ -121,28 +128,55 @@ func (r *Repo) Remove(ctx context.Context, id uuid.UUID) error {
 	if err != nil {
 		return err
 	}
+
 	return repo.Remove(ctx, id)
+}
+
+// Close implements the Close method of the eventhorizon.WriteRepo interface.
+func (r *Repo) Close() error {
+	r.reposMu.RLock()
+	defer r.reposMu.RUnlock()
+
+	var errStrs []string
+
+	for _, repo := range r.repos {
+		if err := repo.Close(); err != nil {
+			errStrs = append(errStrs, err.Error())
+		}
+	}
+
+	if len(errStrs) > 0 {
+		return fmt.Errorf("multiple errors: %s", strings.Join(errStrs, ", "))
+	}
+
+	return nil
 }
 
 // repo is a helper that returns or creates repos for each namespace.
 func (r *Repo) repo(ctx context.Context) (eh.ReadWriteRepo, error) {
 	ns := FromContext(ctx)
+
 	r.reposMu.RLock()
 	repo, ok := r.repos[ns]
 	r.reposMu.RUnlock()
+
 	if !ok {
 		r.reposMu.Lock()
 		// Perform an additional existence check within the write lock in the
 		// unlikely event that someone else added the repo right before us.
 		if _, ok := r.repos[ns]; !ok {
 			var err error
+
 			repo, err = r.newRepo(ns)
 			if err != nil {
 				return nil, fmt.Errorf("could not create repo for namespace '%s': %w", ns, err)
 			}
+
 			r.repos[ns] = repo
 		}
+
 		r.reposMu.Unlock()
 	}
+
 	return repo, nil
 }

@@ -35,7 +35,7 @@ import (
 
 // EventStore is an eventhorizon.EventStore for MongoDB, using one collection
 // for all events and another to keep track of all aggregates/streams. It also
-// keep tracks of the global position of events, stored as metadata.
+// keeps track of the global position of events, stored as metadata.
 type EventStore struct {
 	useCustomPrefix bool
 	customPrefixes  []string
@@ -52,6 +52,7 @@ func NewEventStore(uri, dbName string, options ...Option) (*EventStore, error) {
 	opts.SetWriteConcern(writeconcern.New(writeconcern.WMajority()))
 	opts.SetReadConcern(readconcern.Majority())
 	opts.SetReadPreference(readpref.Primary())
+
 	client, err := mongo.Connect(context.TODO(), opts)
 	if err != nil {
 		return nil, fmt.Errorf("could not connect to DB: %w", err)
@@ -81,6 +82,10 @@ func NewEventStoreWithClient(client *mongo.Client, dbName string, options ...Opt
 		}
 	}
 
+	if err := s.client.Ping(context.Background(), readpref.Primary()); err != nil {
+		return nil, fmt.Errorf("could not connect to MongoDB: %w", err)
+	}
+
 	ctx := context.Background()
 
 	err := s.createIndices(ctx)
@@ -104,15 +109,16 @@ type Option func(*EventStore) error
 func WithEventHandler(h eh.EventHandler) Option {
 	return func(s *EventStore) error {
 		s.eventHandler = h
+
 		return nil
 	}
 }
 
 // WithCustomCollectionPrefix enables the use of multiple collections in the same db.
 // Collections are being selected on runtime using a context value.
-func WithCustomCollectionPrefix(customCollections bool, prefixes []string) Option {
+func WithCustomCollectionPrefix(useCustomPrefix bool, prefixes []string) Option {
 	return func(s *EventStore) error {
-		s.useCustomPrefix = customCollections
+		s.useCustomPrefix = useCustomPrefix
 		s.customPrefixes = prefixes
 		return nil
 	}
@@ -121,27 +127,51 @@ func WithCustomCollectionPrefix(customCollections bool, prefixes []string) Optio
 // Save implements the Save method of the eventhorizon.EventStore interface.
 func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersion int) error {
 	if len(events) == 0 {
-		return eh.EventStoreError{
-			Err: eh.ErrNoEventsToAppend,
+		return &eh.EventStoreError{
+			Err: eh.ErrMissingEvents,
+			Op:  eh.EventStoreOpSave,
 		}
 	}
 
+	dbEvents := make([]interface{}, len(events))
+	id := events[0].AggregateID()
+	at := events[0].AggregateType()
+
 	// Build all event records, with incrementing versions starting from the
 	// original aggregate version.
-	dbEvents := make([]interface{}, len(events))
-	aggregateID := events[0].AggregateID()
 	for i, event := range events {
 		// Only accept events belonging to the same aggregate.
-		if event.AggregateID() != aggregateID {
-			return eh.EventStoreError{
-				Err: eh.ErrInvalidEvent,
+		if event.AggregateID() != id {
+			return &eh.EventStoreError{
+				Err:              eh.ErrMismatchedEventAggregateIDs,
+				Op:               eh.EventStoreOpSave,
+				AggregateType:    at,
+				AggregateID:      id,
+				AggregateVersion: originalVersion,
+				Events:           events,
+			}
+		}
+
+		if event.AggregateType() != at {
+			return &eh.EventStoreError{
+				Err:              eh.ErrMismatchedEventAggregateTypes,
+				Op:               eh.EventStoreOpSave,
+				AggregateType:    at,
+				AggregateID:      id,
+				AggregateVersion: originalVersion,
+				Events:           events,
 			}
 		}
 
 		// Only accept events that apply to the correct aggregate version.
 		if event.Version() != originalVersion+i+1 {
-			return eh.EventStoreError{
-				Err: eh.ErrIncorrectEventVersion,
+			return &eh.EventStoreError{
+				Err:              eh.ErrIncorrectEventVersion,
+				Op:               eh.EventStoreOpSave,
+				AggregateType:    at,
+				AggregateID:      id,
+				AggregateVersion: originalVersion,
+				Events:           events,
 			}
 		}
 
@@ -150,26 +180,27 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 		if err != nil {
 			return err
 		}
+
 		dbEvents[i] = e
 	}
 
 	sess, err := s.client.StartSession(nil)
 	if err != nil {
-		return eh.EventStoreError{
-			Err:     eh.ErrCouldNotSaveEvents,
-			BaseErr: err,
+		return &eh.EventStoreError{
+			Err:              fmt.Errorf("could not start transaction: %w", err),
+			Op:               eh.EventStoreOpSave,
+			AggregateType:    at,
+			AggregateID:      id,
+			AggregateVersion: originalVersion,
+			Events:           events,
 		}
 	}
+
 	defer sess.EndSession(ctx)
 
 	if _, err := sess.WithTransaction(ctx, func(txCtx mongo.SessionContext) (interface{}, error) {
 		// Fetch and increment global version in the all-stream.
-		streams := s.streams
-		if s.useCustomPrefix {
-			streams = s.collStreams(ctx)
-		}
-
-		r := streams.FindOneAndUpdate(txCtx,
+		r := s.collStreams(ctx).FindOneAndUpdate(txCtx,
 			bson.M{"_id": "$all"},
 			bson.M{"$inc": bson.M{"position": len(dbEvents)}},
 		)
@@ -188,7 +219,11 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 		// This natively prevents duplicate events to be written.
 		var strm *stream
 		for i, e := range dbEvents {
-			event := e.(*evt)
+			event, ok := e.(*evt)
+			if !ok {
+				return nil, fmt.Errorf("event is of incorrect type %T", e)
+			}
+
 			event.Position = allStream.Position + i + 1
 			// Also store the position in the event metadata.
 			event.Metadata["position"] = event.Position
@@ -206,12 +241,7 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 		}
 
 		// Store events.
-		eventsCollection := s.events
-		if s.useCustomPrefix {
-			eventsCollection = s.collEvents(ctx)
-		}
-
-		insert, err := eventsCollection.InsertMany(txCtx, dbEvents)
+		insert, err := s.collEvents(ctx).InsertMany(txCtx, dbEvents)
 		if err != nil {
 			return nil, fmt.Errorf("could not insert events: %w", err)
 		}
@@ -219,51 +249,60 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 		// Check that all inserted events got the requested ID (position),
 		// instead of a generated ID by MongoDB.
 		for _, e := range dbEvents {
-			event := e.(*evt)
+			event, ok := e.(*evt)
+			if !ok {
+				return nil, fmt.Errorf("event is of incorrect type %T", e)
+			}
+
 			found := false
 			for _, id := range insert.InsertedIDs {
 				if pos, ok := id.(int32); ok && event.Position == int(pos) {
 					found = true
+
 					break
 				}
 			}
+
 			if !found {
 				return nil, fmt.Errorf("inserted event %s at pos %d not found",
 					event.AggregateID, event.Position)
 			}
 		}
 
-		streamsCollection := s.streams
-		if s.useCustomPrefix {
-			streamsCollection = s.collEvents(ctx)
-		}
-
 		// Update the stream.
 		if originalVersion == 0 {
-			if _, err := streamsCollection.InsertOne(txCtx, strm); err != nil {
+			if _, err := s.collStreams(ctx).InsertOne(txCtx, strm); err != nil {
 				return nil, fmt.Errorf("could not insert stream: %w", err)
 			}
 		} else {
-			if res := streamsCollection.FindOneAndUpdate(txCtx,
-				bson.M{"_id": strm.ID},
+			if r, err := s.collStreams(ctx).UpdateOne(txCtx,
+				bson.M{
+					"_id":     strm.ID,
+					"version": originalVersion,
+				},
 				bson.M{
 					"$set": bson.M{
 						"position":   strm.Position,
-						"version":    strm.Version,
 						"updated_at": strm.UpdatedAt,
 					},
+					"$inc": bson.M{"version": len(dbEvents)},
 				},
-				mongoOptions.FindOneAndUpdate().SetUpsert(true),
-			); res.Err() != nil {
-				return nil, fmt.Errorf("could not update stream: %w", res.Err())
+			); err != nil {
+				return nil, fmt.Errorf("could not update stream: %w", err)
+			} else if r.MatchedCount == 0 {
+				return nil, eh.ErrEventConflictFromOtherSave
 			}
 		}
 
 		return nil, nil
 	}); err != nil {
-		return eh.EventStoreError{
-			Err:     eh.ErrCouldNotSaveEvents,
-			BaseErr: err,
+		return &eh.EventStoreError{
+			Err:              err,
+			Op:               eh.EventStoreOpSave,
+			AggregateType:    at,
+			AggregateID:      id,
+			AggregateVersion: originalVersion,
+			Events:           events,
 		}
 	}
 
@@ -271,7 +310,7 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 	if s.eventHandler != nil {
 		for _, e := range events {
 			if err := s.eventHandler.HandleEvent(ctx, e); err != nil {
-				return eh.CouldNotHandleEventError{
+				return &eh.EventHandlerError{
 					Err:   err,
 					Event: e,
 				}
@@ -284,24 +323,25 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 
 // Load implements the Load method of the eventhorizon.EventStore interface.
 func (s *EventStore) Load(ctx context.Context, id uuid.UUID) ([]eh.Event, error) {
-	eventsCollection := s.events
-	if s.useCustomPrefix {
-		eventsCollection = s.collEvents(ctx)
-	}
-
-	cursor, err := eventsCollection.Find(ctx, bson.M{"aggregate_id": id})
+	cursor, err := s.collEvents(ctx).Find(ctx, bson.M{"aggregate_id": id})
 	if err != nil {
-		return nil, eh.EventStoreError{
-			Err: fmt.Errorf("could not find event: %w", err),
+		return nil, &eh.EventStoreError{
+			Err:         fmt.Errorf("could not find event: %w", err),
+			Op:          eh.EventStoreOpLoad,
+			AggregateID: id,
 		}
 	}
 
 	var events []eh.Event
+
 	for cursor.Next(ctx) {
 		var e evt
 		if err := cursor.Decode(&e); err != nil {
-			return nil, eh.EventStoreError{
-				Err: fmt.Errorf("could not decode event: %w", err),
+			return nil, &eh.EventStoreError{
+				Err:         fmt.Errorf("could not decode event: %w", err),
+				Op:          eh.EventStoreOpLoad,
+				AggregateID: id,
+				Events:      events,
 			}
 		}
 
@@ -309,15 +349,27 @@ func (s *EventStore) Load(ctx context.Context, id uuid.UUID) ([]eh.Event, error)
 		if len(e.RawData) > 0 {
 			var err error
 			if e.data, err = eh.CreateEventData(e.EventType); err != nil {
-				return nil, eh.EventStoreError{
-					Err: fmt.Errorf("could not create event data: %w", err),
+				return nil, &eh.EventStoreError{
+					Err:              fmt.Errorf("could not create event data: %w", err),
+					Op:               eh.EventStoreOpLoad,
+					AggregateType:    e.AggregateType,
+					AggregateID:      id,
+					AggregateVersion: e.Version,
+					Events:           events,
 				}
 			}
+
 			if err := bson.Unmarshal(e.RawData, e.data); err != nil {
-				return nil, eh.EventStoreError{
-					Err: fmt.Errorf("could not unmarshal event data: %w", err),
+				return nil, &eh.EventStoreError{
+					Err:              fmt.Errorf("could not unmarshal event data: %w", err),
+					Op:               eh.EventStoreOpLoad,
+					AggregateType:    e.AggregateType,
+					AggregateID:      id,
+					AggregateVersion: e.Version,
+					Events:           events,
 				}
 			}
+
 			e.RawData = nil
 		}
 
@@ -335,15 +387,20 @@ func (s *EventStore) Load(ctx context.Context, id uuid.UUID) ([]eh.Event, error)
 		events = append(events, event)
 	}
 
+	if len(events) == 0 {
+		return nil, &eh.EventStoreError{
+			Err:         eh.ErrAggregateNotFound,
+			Op:          eh.EventStoreOpLoad,
+			AggregateID: id,
+		}
+	}
+
 	return events, nil
 }
 
-// Close closes the database client.
-func (s *EventStore) Close(ctx context.Context) error {
-	if err := s.client.Disconnect(ctx); err != nil {
-		return fmt.Errorf("could not close DB connection: %w", err)
-	}
-	return nil
+// Close implements the Close method of the eventhorizon.EventStore interface.
+func (s *EventStore) Close() error {
+	return s.client.Disconnect(context.Background())
 }
 
 // stream is a stream of events, often containing the events for an aggregate.
@@ -387,9 +444,10 @@ func newEvt(ctx context.Context, event eh.Event) (*evt, error) {
 	// Marshal event data if there is any.
 	if event.Data() != nil {
 		var err error
+
 		e.RawData, err = bson.Marshal(event.Data())
 		if err != nil {
-			return nil, eh.EventStoreError{
+			return nil, &eh.EventStoreError{
 				Err: fmt.Errorf("could not marshal event data: %w", err),
 			}
 		}
@@ -398,15 +456,25 @@ func newEvt(ctx context.Context, event eh.Event) (*evt, error) {
 	return e, nil
 }
 
-// collEvents returns a collection. If a custom prefix can be fetched from context that one is used. Otherwise returns default_events collection.
+// collEvents returns a collection. Uses standard events collection if useCustomPrefix is set to false.
+// If a custom prefix can be fetched from context that one is used. Otherwise returns default_events collection.
 func (s *EventStore) collEvents(ctx context.Context) *mongo.Collection {
+	if !s.useCustomPrefix {
+		return s.events
+	}
+
 	ns := eh.NamespaceFromContext(ctx)
 
 	return s.db.Collection(ns + "_events")
 }
 
-// collStreams returns a collection. If a custom prefix can be fetched from context that one is used. Otherwise returns default_streams collection.
+// collStreams returns a collection.  Uses standard streams collection if useCustomPrefix is set to false.
+// If a custom prefix can be fetched from context that one is used. Otherwise returns default_streams collection.
 func (s *EventStore) collStreams(ctx context.Context) *mongo.Collection {
+	if !s.useCustomPrefix {
+		return s.streams
+	}
+
 	ns := eh.NamespaceFromContext(ctx)
 
 	return s.db.Collection(ns + "_streams")
@@ -452,7 +520,7 @@ func (s *EventStore) ensureAllStream(ctx context.Context) error {
 	return nil
 }
 
-// createIndices creates incides.
+// createIndices creates indices.
 func (s *EventStore) createIndices(ctx context.Context) error {
 	if !s.useCustomPrefix {
 		if _, err := s.events.Indexes().CreateOne(ctx, mongo.IndexModel{

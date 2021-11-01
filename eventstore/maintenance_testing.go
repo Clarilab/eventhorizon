@@ -16,6 +16,7 @@ package eventstore
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -35,6 +36,7 @@ import (
 //
 func MaintenanceAcceptanceTest(t *testing.T, store eh.EventStore, storeMaintenance eh.EventStoreMaintenance, ctx context.Context) {
 	type contextKey string
+
 	ctx = context.WithValue(ctx, contextKey("testkey"), "testval")
 
 	// Save some events.
@@ -46,6 +48,7 @@ func MaintenanceAcceptanceTest(t *testing.T, store eh.EventStore, storeMaintenan
 		eh.ForAggregate(mocks.AggregateType, id, 2))
 	event3 := eh.NewEvent(mocks.EventType, &mocks.EventData{Content: "event1"}, timestamp,
 		eh.ForAggregate(mocks.AggregateType, id, 3))
+
 	if err := store.Save(ctx, []eh.Event{event1, event2, event3}, 0); err != nil {
 		t.Error("there should be no error:", err)
 	}
@@ -53,15 +56,20 @@ func MaintenanceAcceptanceTest(t *testing.T, store eh.EventStore, storeMaintenan
 	// Replace event, no aggregate.
 	eventWithoutAggregate := eh.NewEvent(mocks.EventType, &mocks.EventData{Content: "event"}, timestamp,
 		eh.ForAggregate(mocks.AggregateType, uuid.New(), 1))
-	if err := storeMaintenance.Replace(ctx, eventWithoutAggregate); err != eh.ErrAggregateNotFound {
+
+	err := storeMaintenance.Replace(ctx, eventWithoutAggregate)
+	if !errors.Is(err, eh.ErrAggregateNotFound) {
 		t.Error("there should be an aggregate not found error:", err)
 	}
 
-	// Replace event, no event version.
-	eventWithoutVersion := eh.NewEvent(mocks.EventType, &mocks.EventData{Content: "event20"}, timestamp,
+	// Replace event, invalid event version.
+	eventWithInvalidVersion := eh.NewEvent(mocks.EventType, &mocks.EventData{Content: "event20"}, timestamp,
 		eh.ForAggregate(mocks.AggregateType, id, 20))
-	if err := storeMaintenance.Replace(ctx, eventWithoutVersion); err != eh.ErrInvalidEvent {
-		t.Error("there should be an invalid event error:", err)
+	eventStoreErr := &eh.EventStoreError{}
+
+	err = storeMaintenance.Replace(ctx, eventWithInvalidVersion)
+	if !errors.As(err, &eventStoreErr) || !errors.Is(err, eh.ErrEventNotFound) {
+		t.Error("there should be a event store error:", err)
 	}
 
 	// Replace event.
@@ -70,15 +78,18 @@ func MaintenanceAcceptanceTest(t *testing.T, store eh.EventStore, storeMaintenan
 	if err := storeMaintenance.Replace(ctx, event2Mod); err != nil {
 		t.Error("there should be no error:", err)
 	}
+
 	events, err := store.Load(ctx, id)
 	if err != nil {
 		t.Error("there should be no error:", err)
 	}
+
 	expectedEvents := []eh.Event{
 		event1,    // Version 1
 		event2Mod, // Version 2, modified
 		event3,    // Version 3
 	}
+
 	for i, event := range events {
 		if err := eh.CompareEvents(event, expectedEvents[i],
 			eh.IgnoreVersion(),
@@ -86,6 +97,7 @@ func MaintenanceAcceptanceTest(t *testing.T, store eh.EventStore, storeMaintenan
 		); err != nil {
 			t.Error("the event was incorrect:", err)
 		}
+
 		if event.Version() != i+1 {
 			t.Error("the event version should be correct:", event, event.Version())
 		}
@@ -96,12 +108,15 @@ func MaintenanceAcceptanceTest(t *testing.T, store eh.EventStore, storeMaintenan
 	id1 := uuid.New()
 	oldEvent1 := eh.NewEvent(oldEventType, nil, timestamp,
 		eh.ForAggregate(mocks.AggregateType, id1, 1))
+
 	if err := store.Save(ctx, []eh.Event{oldEvent1}, 0); err != nil {
 		t.Error("there should be no error:", err)
 	}
+
 	id2 := uuid.New()
 	oldEvent2 := eh.NewEvent(oldEventType, nil, timestamp,
 		eh.ForAggregate(mocks.AggregateType, id2, 1))
+
 	if err := store.Save(ctx, []eh.Event{oldEvent2}, 0); err != nil {
 		t.Error("there should be no error:", err)
 	}
@@ -111,29 +126,37 @@ func MaintenanceAcceptanceTest(t *testing.T, store eh.EventStore, storeMaintenan
 	if err := storeMaintenance.RenameEvent(ctx, oldEventType, newEventType); err != nil {
 		t.Error("there should be no error:", err)
 	}
+
 	events, err = store.Load(ctx, id1)
 	if err != nil {
 		t.Error("there should be no error:", err)
 	}
-	newEvent1 := eh.NewEvent(newEventType, nil, timestamp,
-		eh.ForAggregate(mocks.AggregateType, id1, 1))
+
 	if len(events) != 1 {
 		t.Fatal("there should be one event")
 	}
+
+	newEvent1 := eh.NewEvent(newEventType, nil, timestamp,
+		eh.ForAggregate(mocks.AggregateType, id1, 1))
+
 	if err := eh.CompareEvents(events[0], newEvent1,
 		eh.IgnorePositionMetadata(),
 	); err != nil {
 		t.Error("the event was incorrect:", err)
 	}
+
 	events, err = store.Load(ctx, id2)
 	if err != nil {
 		t.Error("there should be no error:", err)
 	}
-	newEvent2 := eh.NewEvent(newEventType, nil, timestamp,
-		eh.ForAggregate(mocks.AggregateType, id2, 1))
+
 	if len(events) != 1 {
 		t.Fatal("there should be one event")
 	}
+
+	newEvent2 := eh.NewEvent(newEventType, nil, timestamp,
+		eh.ForAggregate(mocks.AggregateType, id2, 1))
+
 	if err := eh.CompareEvents(events[0], newEvent2,
 		eh.IgnorePositionMetadata(),
 	); err != nil {

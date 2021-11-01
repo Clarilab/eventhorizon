@@ -28,13 +28,31 @@ import (
 
 // Replace implements the Replace method of the eventhorizon.EventStore interface.
 func (s *EventStore) Replace(ctx context.Context, event eh.Event) error {
+	id := event.AggregateID()
+	at := event.AggregateType()
+	av := event.Version()
+
 	// First check if the aggregate exists, the not found error in the update
 	// query can mean both that the aggregate or the event is not found.
-	if n, err := s.aggregates.CountDocuments(ctx, bson.M{"_id": event.AggregateID()}); n == 0 {
-		return eh.ErrAggregateNotFound
+	eventsCollection := s.collEvents(ctx)
+
+	if n, err := eventsCollection.CountDocuments(ctx, bson.M{"_id": event.AggregateID()}); n == 0 {
+		return &eh.EventStoreError{
+			Err:              eh.ErrAggregateNotFound,
+			Op:               eh.EventStoreOpReplace,
+			AggregateType:    at,
+			AggregateID:      id,
+			AggregateVersion: av,
+			Events:           []eh.Event{event},
+		}
 	} else if err != nil {
-		return eh.EventStoreError{
-			Err: err,
+		return &eh.EventStoreError{
+			Err:              fmt.Errorf("could not check aggregate existence: %w", err),
+			Op:               eh.EventStoreOpReplace,
+			AggregateType:    at,
+			AggregateID:      id,
+			AggregateVersion: av,
+			Events:           []eh.Event{event},
 		}
 	}
 
@@ -45,7 +63,7 @@ func (s *EventStore) Replace(ctx context.Context, event eh.Event) error {
 	}
 
 	// Find and replace the event.
-	if r, err := s.aggregates.UpdateOne(ctx,
+	if r, err := eventsCollection.UpdateOne(ctx,
 		bson.M{
 			"_id":            event.AggregateID(),
 			"events.version": event.Version(),
@@ -54,12 +72,23 @@ func (s *EventStore) Replace(ctx context.Context, event eh.Event) error {
 			"$set": bson.M{"events.$": *e},
 		},
 	); err != nil {
-		return eh.EventStoreError{
-			Err:     eh.ErrCouldNotSaveEvents,
-			BaseErr: err,
+		return &eh.EventStoreError{
+			Err:              err,
+			Op:               eh.EventStoreOpReplace,
+			AggregateType:    at,
+			AggregateID:      id,
+			AggregateVersion: av,
+			Events:           []eh.Event{event},
 		}
 	} else if r.MatchedCount == 0 {
-		return eh.ErrInvalidEvent
+		return &eh.EventStoreError{
+			Err:              eh.ErrEventNotFound,
+			Op:               eh.EventStoreOpReplace,
+			AggregateType:    at,
+			AggregateID:      id,
+			AggregateVersion: av,
+			Events:           []eh.Event{event},
+		}
 	}
 
 	return nil
@@ -69,7 +98,7 @@ func (s *EventStore) Replace(ctx context.Context, event eh.Event) error {
 func (s *EventStore) RenameEvent(ctx context.Context, from, to eh.EventType) error {
 	// Find and rename all events.
 	// TODO: Maybe use change info.
-	if _, err := s.aggregates.UpdateMany(ctx,
+	if _, err := s.collEvents(ctx).UpdateMany(ctx,
 		bson.M{
 			"events.event_type": from.String(),
 		},
@@ -77,9 +106,9 @@ func (s *EventStore) RenameEvent(ctx context.Context, from, to eh.EventType) err
 			"$set": bson.M{"events.$.event_type": to.String()},
 		},
 	); err != nil {
-		return eh.EventStoreError{
-			Err:     eh.ErrCouldNotSaveEvents,
-			BaseErr: err,
+		return &eh.EventStoreError{
+			Err: fmt.Errorf("could not update events of type '%s': %w", from, err),
+			Op:  eh.EventStoreOpRename,
 		}
 	}
 
@@ -88,10 +117,12 @@ func (s *EventStore) RenameEvent(ctx context.Context, from, to eh.EventType) err
 
 // Clear clears the event storage.
 func (s *EventStore) Clear(ctx context.Context) error {
-	if err := s.aggregates.Drop(ctx); err != nil {
-		return eh.EventStoreError{
-			Err: fmt.Errorf("could not clear collection: %w", err),
+	if err := s.collEvents(ctx).Drop(ctx); err != nil {
+		return &eh.EventStoreError{
+			Err: err,
+			Op:  eh.EventStoreOpRename,
 		}
 	}
+
 	return nil
 }

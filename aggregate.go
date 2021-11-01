@@ -65,6 +65,64 @@ var (
 	ErrAggregateNotRegistered = errors.New("aggregate not registered")
 )
 
+// AggregateStoreOperation is the operation done when an error happened.
+type AggregateStoreOperation string
+
+const (
+	// Errors during loading of aggregates.
+	AggregateStoreOpLoad = "load"
+	// Errors during saving of aggregates.
+	AggregateStoreOpSave = "save"
+)
+
+// AggregateStoreError contains related info about errors in the store.
+type AggregateStoreError struct {
+	// Err is the error that happened when applying the event.
+	Err error
+	// Op is the operation for the error.
+	Op AggregateStoreOperation
+	// AggregateType of related operation.
+	AggregateType AggregateType
+	// AggregateID of related operation.
+	AggregateID uuid.UUID
+}
+
+// Error implements the Error method of the error interface.
+func (e *AggregateStoreError) Error() string {
+	str := "aggregate store: "
+
+	if e.Op != "" {
+		str += string(e.Op) + ": "
+	}
+
+	if e.Err != nil {
+		str += e.Err.Error()
+	} else {
+		str += "unknown error"
+	}
+
+	if e.AggregateID != uuid.Nil {
+		at := "Aggregate"
+		if e.AggregateType != "" {
+			at = string(e.AggregateType)
+		}
+
+		str += fmt.Sprintf(", %s(%s)", at, e.AggregateID)
+	}
+
+	return str
+}
+
+// Unwrap implements the errors.Unwrap method.
+func (e *AggregateStoreError) Unwrap() error {
+	return e.Err
+}
+
+// Cause implements the github.com/pkg/errors Unwrap method.
+func (e *AggregateStoreError) Cause() error {
+	return e.Unwrap()
+}
+
 // AggregateError is an error caused in the aggregate when handling a command.
 type AggregateError struct {
 	// Err is the error.
@@ -72,17 +130,17 @@ type AggregateError struct {
 }
 
 // Error implements the Error method of the errors.Error interface.
-func (e AggregateError) Error() string {
+func (e *AggregateError) Error() string {
 	return "aggregate error: " + e.Err.Error()
 }
 
 // Unwrap implements the errors.Unwrap method.
-func (e AggregateError) Unwrap() error {
+func (e *AggregateError) Unwrap() error {
 	return e.Err
 }
 
 // Cause implements the github.com/pkg/errors Unwrap method.
-func (e AggregateError) Cause() error {
+func (e *AggregateError) Cause() error {
 	return e.Unwrap()
 }
 
@@ -92,14 +150,14 @@ func (e AggregateError) Cause() error {
 // An example would be:
 //     RegisterAggregate(func(id UUID) Aggregate { return &MyAggregate{id} })
 func RegisterAggregate(factory func(uuid.UUID) Aggregate) {
+	// Check that the created aggregate matches the registered type.
 	// TODO: Explore the use of reflect/gob for creating concrete types without
 	// a factory func.
-
-	// Check that the created aggregate matches the registered type.
 	aggregate := factory(uuid.New())
 	if aggregate == nil {
 		panic("eventhorizon: created aggregate is nil")
 	}
+
 	aggregateType := aggregate.AggregateType()
 	if aggregateType == AggregateType("") {
 		panic("eventhorizon: attempt to register empty aggregate type")
@@ -107,9 +165,11 @@ func RegisterAggregate(factory func(uuid.UUID) Aggregate) {
 
 	aggregatesMu.Lock()
 	defer aggregatesMu.Unlock()
+
 	if _, ok := aggregates[aggregateType]; ok {
 		panic(fmt.Sprintf("eventhorizon: registering duplicate types for %q", aggregateType))
 	}
+
 	aggregates[aggregateType] = factory
 }
 
@@ -118,9 +178,11 @@ func RegisterAggregate(factory func(uuid.UUID) Aggregate) {
 func CreateAggregate(aggregateType AggregateType, id uuid.UUID) (Aggregate, error) {
 	aggregatesMu.RLock()
 	defer aggregatesMu.RUnlock()
+
 	if factory, ok := aggregates[aggregateType]; ok {
 		return factory(id), nil
 	}
+
 	return nil, ErrAggregateNotRegistered
 }
 

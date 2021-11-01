@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 
 	eh "github.com/looplab/eventhorizon"
@@ -42,6 +43,7 @@ func NewRepo() *Repo {
 	r := &Repo{
 		db: map[uuid.UUID][]byte{},
 	}
+
 	return r
 }
 
@@ -56,17 +58,21 @@ func IntoRepo(ctx context.Context, repo eh.ReadRepo) *Repo {
 	if repo == nil {
 		return nil
 	}
+
 	if r, ok := repo.(*Repo); ok {
 		return r
 	}
+
 	return IntoRepo(ctx, repo.InnerRepo(ctx))
 }
 
 // Find implements the Find method of the eventhorizon.ReadRepo interface.
 func (r *Repo) Find(ctx context.Context, id uuid.UUID) (eh.Entity, error) {
 	if r.factoryFn == nil {
-		return nil, eh.RepoError{
-			Err: ErrModelNotSet,
+		return nil, &eh.RepoError{
+			Err:      ErrModelNotSet,
+			Op:       eh.RepoOpFind,
+			EntityID: id,
 		}
 	}
 
@@ -76,17 +82,20 @@ func (r *Repo) Find(ctx context.Context, id uuid.UUID) (eh.Entity, error) {
 	// Fetch entity.
 	b, ok := r.db[id]
 	if !ok {
-		return nil, eh.RepoError{
-			Err: eh.ErrEntityNotFound,
+		return nil, &eh.RepoError{
+			Err:      eh.ErrEntityNotFound,
+			Op:       eh.RepoOpFind,
+			EntityID: id,
 		}
 	}
 
 	// Unmarshal.
 	entity := r.factoryFn()
 	if err := json.Unmarshal(b, &entity); err != nil {
-		return nil, eh.RepoError{
-			Err:     eh.ErrCouldNotLoadEntity,
-			BaseErr: err,
+		return nil, &eh.RepoError{
+			Err:      fmt.Errorf("could not unmarshal: %w", err),
+			Op:       eh.RepoOpFind,
+			EntityID: id,
 		}
 	}
 
@@ -96,23 +105,27 @@ func (r *Repo) Find(ctx context.Context, id uuid.UUID) (eh.Entity, error) {
 // FindAll implements the FindAll method of the eventhorizon.ReadRepo interface.
 func (r *Repo) FindAll(ctx context.Context) ([]eh.Entity, error) {
 	if r.factoryFn == nil {
-		return nil, eh.RepoError{
+		return nil, &eh.RepoError{
 			Err: ErrModelNotSet,
+			Op:  eh.RepoOpFindAll,
 		}
 	}
 
 	r.dbMu.RLock()
 	defer r.dbMu.RUnlock()
+
 	result := []eh.Entity{}
+
 	for _, id := range r.ids {
 		if b, ok := r.db[id]; ok {
 			entity := r.factoryFn()
 			if err := json.Unmarshal(b, &entity); err != nil {
-				return nil, eh.RepoError{
-					Err:     eh.ErrCouldNotLoadEntity,
-					BaseErr: err,
+				return nil, &eh.RepoError{
+					Err: fmt.Errorf("could not unmarshal: %w", err),
+					Op:  eh.RepoOpFindAll,
 				}
 			}
+
 			result = append(result, entity)
 		}
 	}
@@ -123,28 +136,30 @@ func (r *Repo) FindAll(ctx context.Context) ([]eh.Entity, error) {
 // Save implements the Save method of the eventhorizon.WriteRepo interface.
 func (r *Repo) Save(ctx context.Context, entity eh.Entity) error {
 	if r.factoryFn == nil {
-		return eh.RepoError{
+		return &eh.RepoError{
 			Err: ErrModelNotSet,
+			Op:  eh.RepoOpSave,
 		}
 	}
 
-	if entity.EntityID() == uuid.Nil {
-		return eh.RepoError{
-			Err:     eh.ErrCouldNotSaveEntity,
-			BaseErr: eh.ErrMissingEntityID,
+	id := entity.EntityID()
+	if id == uuid.Nil {
+		return &eh.RepoError{
+			Err: fmt.Errorf("missing entity ID"),
+			Op:  eh.RepoOpSave,
 		}
 	}
 
 	r.dbMu.Lock()
 	defer r.dbMu.Unlock()
-	id := entity.EntityID()
 
 	// Insert entity.
 	b, err := json.Marshal(entity)
 	if err != nil {
-		return eh.RepoError{
-			Err:     eh.ErrCouldNotSaveEntity,
-			BaseErr: err,
+		return &eh.RepoError{
+			Err:      fmt.Errorf("could not marshal: %w", err),
+			Op:       eh.RepoOpSave,
+			EntityID: id,
 		}
 	}
 
@@ -152,6 +167,7 @@ func (r *Repo) Save(ctx context.Context, entity eh.Entity) error {
 	if _, ok := r.db[id]; !ok {
 		r.ids = append(r.ids, id)
 	}
+
 	r.db[id] = b
 
 	return nil
@@ -161,27 +177,38 @@ func (r *Repo) Save(ctx context.Context, entity eh.Entity) error {
 func (r *Repo) Remove(ctx context.Context, id uuid.UUID) error {
 	r.dbMu.Lock()
 	defer r.dbMu.Unlock()
+
 	if _, ok := r.db[id]; ok {
 		delete(r.db, id)
 
 		index := -1
+
 		for i, d := range r.ids {
 			if id == d {
 				index = i
+
 				break
 			}
 		}
+
 		r.ids = append(r.ids[:index], r.ids[index+1:]...)
 
 		return nil
 	}
 
-	return eh.RepoError{
-		Err: eh.ErrEntityNotFound,
+	return &eh.RepoError{
+		Err:      eh.ErrEntityNotFound,
+		Op:       eh.RepoOpRemove,
+		EntityID: id,
 	}
 }
 
 // SetEntityFactory sets a factory function that creates concrete entity types.
 func (r *Repo) SetEntityFactory(f func() eh.Entity) {
 	r.factoryFn = f
+}
+
+// Close implements the Close method of the eventhorizon.WriteRepo interface.
+func (r *Repo) Close() error {
+	return nil
 }

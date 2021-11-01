@@ -48,6 +48,7 @@ func TestAddHandler(t *testing.T, bus1 eh.EventBus) {
 	if err := bus1.AddHandler(ctx, eh.MatchAll{}, mocks.NewEventHandler("multi")); err != nil {
 		t.Fatal("there should be no error:", err)
 	}
+
 	if err := bus1.AddHandler(ctx, eh.MatchAll{}, mocks.NewEventHandler("multi")); err != eh.ErrHandlerAlreadyAdded {
 		t.Error("the error should be correct:", err)
 	}
@@ -64,7 +65,7 @@ func TestAddHandler(t *testing.T, bus1 eh.EventBus) {
 //   }
 //
 func AcceptanceTest(t *testing.T, bus1, bus2 eh.EventBus, timeout time.Duration) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx := context.Background()
 	ctx = mocks.WithContextOne(ctx, "testval")
 
 	// Without handler.
@@ -74,6 +75,7 @@ func AcceptanceTest(t *testing.T, bus1, bus2 eh.EventBus, timeout time.Duration)
 		eh.ForAggregate(mocks.AggregateType, id, 1),
 		eh.WithMetadata(map[string]interface{}{"meta": "data", "num": 42.0}),
 	)
+
 	if err := bus1.HandleEvent(ctx, event1); err != nil {
 		t.Error("there should be no error:", err)
 	}
@@ -91,13 +93,16 @@ func AcceptanceTest(t *testing.T, bus1, bus2 eh.EventBus, timeout time.Duration)
 	if err := bus1.HandleEvent(ctx, eventWithoutData); err != nil {
 		t.Error("there should be no error:", err)
 	}
-	expectedEvents := []eh.Event{eventWithoutData}
+
 	if !otherHandler.Wait(timeout) {
 		t.Error("did not receive event in time")
 	}
+
+	expectedEvents := []eh.Event{eventWithoutData}
 	if !eh.CompareEventSlices(otherHandler.Events, expectedEvents) {
 		t.Error("the events were incorrect:")
 		t.Log(otherHandler.Events)
+
 		if len(otherHandler.Events) == 1 {
 			t.Log(pretty.Sprint(otherHandler.Events[0]))
 		}
@@ -110,13 +115,15 @@ func AcceptanceTest(t *testing.T, bus1, bus2 eh.EventBus, timeout time.Duration)
 
 	// Add handlers and observers.
 	handlerBus1 := mocks.NewEventHandler(handlerName)
-	handlerBus2 := mocks.NewEventHandler(handlerName)
 	if err := bus1.AddHandler(ctx, eh.MatchEvents{mocks.EventType}, handlerBus1); err != nil {
 		t.Fatal("there should be no error:", err)
 	}
+
+	handlerBus2 := mocks.NewEventHandler(handlerName)
 	if err := bus2.AddHandler(ctx, eh.MatchEvents{mocks.EventType}, handlerBus2); err != nil {
 		t.Fatal("there should be no error:", err)
 	}
+
 	anotherHandlerBus2 := mocks.NewEventHandler("another_handler")
 	if err := bus2.AddHandler(ctx, eh.MatchEvents{mocks.EventType}, anotherHandlerBus2); err != nil {
 		t.Fatal("there should be no error:", err)
@@ -124,10 +131,11 @@ func AcceptanceTest(t *testing.T, bus1, bus2 eh.EventBus, timeout time.Duration)
 
 	// Add observers using the observer middleware.
 	observerBus1 := mocks.NewEventHandler(observerName)
-	observerBus2 := mocks.NewEventHandler(observerName)
 	if err := bus1.AddHandler(ctx, eh.MatchAll{}, eh.UseEventHandlerMiddleware(observerBus1, observer.Middleware)); err != nil {
 		t.Fatal("there should be no error:", err)
 	}
+
+	observerBus2 := mocks.NewEventHandler(observerName)
 	if err := bus2.AddHandler(ctx, eh.MatchAll{}, eh.UseEventHandlerMiddleware(observerBus2, observer.Middleware)); err != nil {
 		t.Fatal("there should be no error:", err)
 	}
@@ -144,35 +152,42 @@ func AcceptanceTest(t *testing.T, bus1, bus2 eh.EventBus, timeout time.Duration)
 	}
 
 	// Check for correct event in handler 1 or 2.
-	expectedEvents = []eh.Event{event2}
 	if !(handlerBus1.Wait(timeout) || handlerBus2.Wait(timeout)) {
 		t.Error("did not receive event in time")
 	}
+
+	expectedEvents = []eh.Event{event2}
 	if !(eh.CompareEventSlices(handlerBus1.Events, expectedEvents) ||
 		eh.CompareEventSlices(handlerBus2.Events, expectedEvents)) {
 		t.Error("the events were incorrect:")
 		t.Log(handlerBus1.Events)
 		t.Log(handlerBus2.Events)
+
 		if len(handlerBus1.Events) == 1 {
 			t.Log(pretty.Sprint(handlerBus1.Events[0]))
 		}
+
 		if len(handlerBus2.Events) == 1 {
 			t.Log(pretty.Sprint(handlerBus2.Events[0]))
 		}
 	}
+
 	if eh.CompareEventSlices(handlerBus1.Events, handlerBus2.Events) {
 		t.Error("only one handler should receive the events")
 		t.Log(handlerBus1.Events)
 		t.Log(handlerBus2.Events)
 	}
+
 	correctCtx1 := false
 	if val, ok := mocks.ContextOne(handlerBus1.Context); ok && val == "testval" {
 		correctCtx1 = true
 	}
+
 	correctCtx2 := false
 	if val, ok := mocks.ContextOne(handlerBus2.Context); ok && val == "testval" {
 		correctCtx2 = true
 	}
+
 	if !correctCtx1 && !correctCtx2 {
 		t.Error("the context should be correct")
 	}
@@ -181,10 +196,12 @@ func AcceptanceTest(t *testing.T, bus1, bus2 eh.EventBus, timeout time.Duration)
 	if !anotherHandlerBus2.Wait(timeout) {
 		t.Error("did not receive event in time")
 	}
+
 	if !eh.CompareEventSlices(anotherHandlerBus2.Events, expectedEvents) {
 		t.Error("the events were incorrect:")
 		t.Log(anotherHandlerBus2.Events)
 	}
+
 	if val, ok := mocks.ContextOne(anotherHandlerBus2.Context); !ok || val != "testval" {
 		t.Error("the context should be correct:", anotherHandlerBus2.Context)
 	}
@@ -193,11 +210,13 @@ func AcceptanceTest(t *testing.T, bus1, bus2 eh.EventBus, timeout time.Duration)
 	if !observerBus1.Wait(timeout) {
 		t.Error("did not receive event in time")
 	}
+
 	for i, event := range observerBus1.Events {
 		if err := eh.CompareEvents(event, expectedEvents[i]); err != nil {
 			t.Error("the event was incorrect:", err)
 		}
 	}
+
 	if val, ok := mocks.ContextOne(observerBus1.Context); !ok || val != "testval" {
 		t.Error("the context should be correct:", observerBus1.Context)
 	}
@@ -206,11 +225,13 @@ func AcceptanceTest(t *testing.T, bus1, bus2 eh.EventBus, timeout time.Duration)
 	if !observerBus2.Wait(timeout) {
 		t.Error("did not receive event in time")
 	}
+
 	for i, event := range observerBus2.Events {
 		if err := eh.CompareEvents(event, expectedEvents[i]); err != nil {
 			t.Error("the event was incorrect:", err)
 		}
 	}
+
 	if val, ok := mocks.ContextOne(observerBus2.Context); !ok || val != "testval" {
 		t.Error("the context should be correct:", observerBus2.Context)
 	}
@@ -222,6 +243,7 @@ func AcceptanceTest(t *testing.T, bus1, bus2 eh.EventBus, timeout time.Duration)
 	// Test async errors from handlers.
 	errorHandler := mocks.NewEventHandler("error_handler")
 	errorHandler.Err = errors.New("handler error")
+
 	if err := bus1.AddHandler(ctx, eh.MatchAll{}, errorHandler); err != nil {
 		t.Fatal("there should be no error:", err)
 	}
@@ -240,23 +262,29 @@ func AcceptanceTest(t *testing.T, bus1, bus2 eh.EventBus, timeout time.Duration)
 		t.Error("there should be an async error")
 	case err := <-bus1.Errors():
 		// Good case.
-		if err.Error() != "could not handle event (error_handler): handler error: (Event@3)" {
+		if err.Error() != "event bus: could not handle event (error_handler): handler error [Event("+id.String()+", v3)]" {
 			t.Error("incorrect error sent on event bus:", err)
 		}
 	}
 
-	// Cancel all handlers and wait.
-	cancel()
-	bus1.Wait()
-	bus2.Wait()
+	// TODO: Test context cancellation.
+
+	if err := bus1.Close(); err != nil {
+		t.Error("there should be no error:", err)
+	}
+
+	if err := bus2.Close(); err != nil {
+		t.Error("there should be no error:", err)
+	}
 }
 
 func checkBusErrors(t *testing.T, bus eh.EventBus) {
 	t.Helper()
+
 	for {
 		select {
 		case err := <-bus.Errors():
-			if err.Err != nil {
+			if err != nil {
 				t.Error("there should be no previous error:", err)
 			}
 		default:
@@ -300,6 +328,7 @@ func benchmark(t bench, bus eh.EventBus, numAggregates, numHandlers, numEvents i
 		if err := bus.AddHandler(ctx, eh.MatchAll{}, h); err != nil {
 			t.Fatal("there should be no error:", err)
 		}
+
 		handlers[i] = h
 	}
 
@@ -310,9 +339,12 @@ func benchmark(t bench, bus eh.EventBus, numAggregates, numHandlers, numEvents i
 	var wg sync.WaitGroup
 	for _, h := range handlers {
 		wg.Add(1)
+
 		go func(h *mocks.EventHandler) {
 			defer wg.Done()
+
 			numEventsReceived := 0
+
 			for {
 				if numEventsReceived == numEvents {
 					return
@@ -320,11 +352,13 @@ func benchmark(t bench, bus eh.EventBus, numAggregates, numHandlers, numEvents i
 				select {
 				case <-h.Recv:
 					numEventsReceived++
+
 					continue
 				case <-ctx.Done():
 					return
 				case <-time.After(30 * time.Second):
 					t.Error("did not receive message within timeout")
+
 					return
 				}
 			}
@@ -335,6 +369,7 @@ func benchmark(t bench, bus eh.EventBus, numAggregates, numHandlers, numEvents i
 		id      uuid.UUID
 		version int
 	}
+
 	for i := 0; i < numAggregates; i++ {
 		aggregates = append(aggregates, &struct {
 			id      uuid.UUID
@@ -343,13 +378,16 @@ func benchmark(t bench, bus eh.EventBus, numAggregates, numHandlers, numEvents i
 	}
 
 	t.ResetTimer()
+
 	for n := 0; n < numEvents; n++ {
 		a := aggregates[rand.Intn(len(aggregates))]
 		a.version++
+
 		timestamp := time.Date(2009, time.November, 10, 23, n, 0, 0, time.UTC)
 		e := eh.NewEvent(
 			mocks.EventType, &mocks.EventData{Content: fmt.Sprintf("event%d", n)}, timestamp,
 			eh.ForAggregate(mocks.AggregateType, a.id, a.version))
+
 		if err := bus.HandleEvent(ctx, e); err != nil {
 			t.Error("there should be no error:", err)
 		}
@@ -357,8 +395,9 @@ func benchmark(t bench, bus eh.EventBus, numAggregates, numHandlers, numEvents i
 
 	wg.Wait() // Wait for all events to be received.
 	t.StopTimer()
+	cancel() // Stop receiving goroutines.
 
-	// Cancel handler and wait.
-	cancel()
-	bus.Wait()
+	if err := bus.Close(); err != nil {
+		t.Error("there should be no error:", err)
+	}
 }

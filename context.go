@@ -37,39 +37,36 @@ const (
 	namespaceKeyStr     = "eh_namespace"
 )
 
-// NamespaceFromContext returns the namespace from the context, or the default
-// namespace.
-func NamespaceFromContext(ctx context.Context) string {
-	if ns, ok := ctx.Value(namespaceKey).(string); ok {
-		return ns
-	}
-	return DefaultNamespace
-}
-
 func init() {
 	RegisterContextMarshaler(func(ctx context.Context, vals map[string]interface{}) {
 		if aggregateID, ok := AggregateIDFromContext(ctx); ok {
 			vals[aggregateIDKeyStr] = aggregateID.String()
 		}
+
 		if aggregateType, ok := AggregateTypeFromContext(ctx); ok {
 			vals[aggregateTypeKeyStr] = string(aggregateType)
 		}
+
 		if commandType, ok := CommandTypeFromContext(ctx); ok {
 			vals[commandTypeKeyStr] = string(commandType)
 		}
 	})
+
 	RegisterContextUnmarshaler(func(ctx context.Context, vals map[string]interface{}) context.Context {
 		if aggregateIDStr, ok := vals[aggregateIDKeyStr].(string); ok {
 			if aggregateID, err := uuid.Parse(aggregateIDStr); err == nil {
 				ctx = NewContextWithAggregateID(ctx, aggregateID)
 			}
 		}
+
 		if aggregateType, ok := vals[aggregateTypeKeyStr].(string); ok {
 			ctx = NewContextWithAggregateType(ctx, AggregateType(aggregateType))
 		}
+
 		if commandType, ok := vals[commandTypeKeyStr].(string); ok {
 			ctx = NewContextWithCommandType(ctx, CommandType(commandType))
 		}
+
 		return ctx
 	})
 }
@@ -86,19 +83,32 @@ const (
 // AggregateIDFromContext return the command type from the context.
 func AggregateIDFromContext(ctx context.Context) (uuid.UUID, bool) {
 	aggregateID, ok := ctx.Value(aggregateIDKey).(uuid.UUID)
+
 	return aggregateID, ok
 }
 
 // AggregateTypeFromContext return the command type from the context.
 func AggregateTypeFromContext(ctx context.Context) (AggregateType, bool) {
 	aggregateType, ok := ctx.Value(aggregateTypeKey).(AggregateType)
+
 	return aggregateType, ok
 }
 
 // CommandTypeFromContext return the command type from the context.
 func CommandTypeFromContext(ctx context.Context) (CommandType, bool) {
 	commandType, ok := ctx.Value(commandTypeKey).(CommandType)
+
 	return commandType, ok
+}
+
+// NamespaceFromContext returns the namespace from the context, or the default
+// namespace.
+func NamespaceFromContext(ctx context.Context) string {
+	ns, ok := ctx.Value(namespaceKey).(string)
+	if ok {
+		return ns
+	}
+	return DefaultNamespace
 }
 
 // NewContextWithAggregateID adds a aggregate ID on the context.
@@ -114,6 +124,11 @@ func NewContextWithAggregateType(ctx context.Context, aggregateType AggregateTyp
 // NewContextWithCommandType adds a command type on the context.
 func NewContextWithCommandType(ctx context.Context, commandType CommandType) context.Context {
 	return context.WithValue(ctx, commandTypeKey, commandType)
+}
+
+// NewContextWithNameSpace adds a namespace on the context.
+func NewContextWithNameSpace(ctx context.Context, ns string) context.Context {
+	return context.WithValue(ctx, namespaceKey, ns)
 }
 
 // Private context marshaling funcs.
@@ -133,6 +148,7 @@ type ContextMarshalFunc func(context.Context, map[string]interface{})
 func RegisterContextMarshaler(f ContextMarshalFunc) {
 	contextMarshalFuncsMu.Lock()
 	defer contextMarshalFuncsMu.Unlock()
+
 	contextMarshalFuncs = append(contextMarshalFuncs, f)
 }
 
@@ -151,6 +167,7 @@ func MarshalContext(ctx context.Context) map[string]interface{} {
 			if _, ok := allVals[key]; ok {
 				panic("duplicate context entry for: " + key)
 			}
+
 			allVals[key] = val
 		}
 	}
@@ -166,6 +183,7 @@ type ContextUnmarshalFunc func(context.Context, map[string]interface{}) context.
 func RegisterContextUnmarshaler(f ContextUnmarshalFunc) {
 	contextUnmarshalFuncsMu.Lock()
 	defer contextUnmarshalFuncsMu.Unlock()
+
 	contextUnmarshalFuncs = append(contextUnmarshalFuncs, f)
 }
 

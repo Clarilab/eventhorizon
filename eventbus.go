@@ -17,12 +17,11 @@ package eventhorizon
 import (
 	"context"
 	"errors"
-	"fmt"
 )
 
 // EventBus is an EventHandler that distributes published events to all matching
 // handlers that are registered, but only one of each type will handle the event.
-// Events are not garanteed to be handeled in order.
+// Events are not guaranteed to be handeled in order.
 type EventBus interface {
 	EventHandler
 
@@ -32,11 +31,20 @@ type EventBus interface {
 	AddHandler(context.Context, EventMatcher, EventHandler) error
 
 	// Errors returns an error channel where async handling errors are sent.
-	Errors() <-chan EventBusError
+	Errors() <-chan error
 
-	// Wait wait for all handlers to be cancelled by their context.
-	Wait()
+	// Close closes the EventBus and waits for all handlers to finish.
+	Close() error
 }
+
+var (
+	// ErrMissingMatcher is returned when calling AddHandler without a matcher.
+	ErrMissingMatcher = errors.New("missing matcher")
+	// ErrMissingHandler is returned when calling AddHandler with a nil handler.
+	ErrMissingHandler = errors.New("missing handler")
+	// ErrHandlerAlreadyAdded is returned when calling AddHandler weth the same handler twice.
+	ErrHandlerAlreadyAdded = errors.New("handler already added")
+)
 
 // EventBusError is an async error containing the error returned from a handler
 // and the event that it happened on.
@@ -50,25 +58,28 @@ type EventBusError struct {
 }
 
 // Error implements the Error method of the error interface.
-func (e EventBusError) Error() string {
-	return fmt.Sprintf("%s: (%s)", e.Err, e.Event)
+func (e *EventBusError) Error() string {
+	str := "event bus: "
+
+	if e.Err != nil {
+		str += e.Err.Error()
+	} else {
+		str += "unknown error"
+	}
+
+	if e.Event != nil {
+		str += " [" + e.Event.String() + "]"
+	}
+
+	return str
 }
 
 // Unwrap implements the errors.Unwrap method.
-func (e EventBusError) Unwrap() error {
+func (e *EventBusError) Unwrap() error {
 	return e.Err
 }
 
 // Cause implements the github.com/pkg/errors Unwrap method.
-func (e EventBusError) Cause() error {
+func (e *EventBusError) Cause() error {
 	return e.Unwrap()
 }
-
-// ErrMissingMatcher is returned when calling AddHandler without a matcher.
-var ErrMissingMatcher = errors.New("missing matcher")
-
-// ErrMissingHandler is returned when calling AddHandler with a nil handler.
-var ErrMissingHandler = errors.New("missing handler")
-
-// ErrHandlerAlreadyAdded is returned when calling AddHandler weth the same handler twice.
-var ErrHandlerAlreadyAdded = errors.New("handler already added")
