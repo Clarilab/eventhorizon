@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	eh "github.com/looplab/eventhorizon"
 	"os"
 	"testing"
 
@@ -59,4 +60,45 @@ func TestEventStoreMaintenanceIntegration(t *testing.T) {
 	defer store.Close()
 
 	eventstore.MaintenanceAcceptanceTest(t, store, store, context.Background())
+}
+
+func TestWithCustomPrefixEventStoreMaintenanceIntegration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	// Use MongoDB in Docker with fallback to localhost.
+	addr := os.Getenv("MONGODB_ADDR")
+	if addr == "" {
+		addr = "localhost:27017"
+	}
+
+	url := "mongodb://" + addr
+
+	// Get a random DB name.
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		t.Fatal(err)
+	}
+
+	db := "test-" + hex.EncodeToString(b)
+
+	t.Log("using DB:", db)
+
+	store, err := NewEventStore(url, db)
+	if err != nil {
+		t.Fatal("there should be no error:", err)
+	}
+
+	if store == nil {
+		t.Fatal("there should be a store")
+	}
+
+	defer store.Close()
+
+	prefixes := []string{"fooPrefix", "barPrefix"}
+
+	for _, prefix := range prefixes {
+		eventstore.MaintenanceAcceptanceTest(t, store, store, eh.NewContextWithNameSpace(context.Background(), prefix))
+	}
 }
