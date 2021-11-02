@@ -299,6 +299,8 @@ func (b *EventBus) handler(m eh.EventMatcher, h eh.EventHandler, groupName strin
 			return
 		}
 
+		handlerCtx := ctx
+
 		// use context with custom namespace
 		if b.useCustomPrefix {
 			namespace, ok := msg.Values[namespaceKey].(string)
@@ -314,11 +316,11 @@ func (b *EventBus) handler(m eh.EventMatcher, h eh.EventHandler, groupName strin
 				return
 			}
 
-			ctx = eh.NewContextWithNameSpace(ctx, namespace)
+			handlerCtx = eh.NewContextWithNameSpace(ctx, namespace)
 		}
 
 		// Handle the event if it did match.
-		if err := h.HandleEvent(ctx, event); err != nil {
+		if err := h.HandleEvent(handlerCtx, event); err != nil {
 			err = fmt.Errorf("could not handle event (%s): %w", h.HandlerType(), err)
 			select {
 			case b.errCh <- &eh.EventBusError{Err: err, Ctx: ctx, Event: event}:
