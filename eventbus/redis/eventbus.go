@@ -32,18 +32,19 @@ import (
 // EventBus is a local event bus that delegates handling of published events
 // to all matching registered handlers, in order of registration.
 type EventBus struct {
-	appID        string
-	clientID     string
-	streamName   string
-	client       *redis.Client
-	clientOpts   *redis.Options
-	registered   map[eh.EventHandlerType]struct{}
-	registeredMu sync.RWMutex
-	errCh        chan error
-	cctx         context.Context
-	cancel       context.CancelFunc
-	wg           sync.WaitGroup
-	codec        eh.EventCodec
+	appID           string
+	clientID        string
+	streamName      string
+	client          *redis.Client
+	clientOpts      *redis.Options
+	registered      map[eh.EventHandlerType]struct{}
+	registeredMu    sync.RWMutex
+	errCh           chan error
+	cctx            context.Context
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
+	codec           eh.EventCodec
+	useCustomPrefix bool
 }
 
 // NewEventBus creates an EventBus, with optional settings.
@@ -109,6 +110,15 @@ func WithRedisOptions(opts *redis.Options) Option {
 	}
 }
 
+// WithUseCustomNamespace enables the use of custom namespace in context.
+func WithUseCustomNamespace(useCustomPrefix bool) Option {
+	return func(b *EventBus) error {
+		b.useCustomPrefix = useCustomPrefix
+
+		return nil
+	}
+}
+
 // HandlerType implements the HandlerType method of the eventhorizon.EventHandler interface.
 func (b *EventBus) HandlerType() eh.EventHandlerType {
 	return "eventbus"
@@ -118,6 +128,7 @@ const (
 	aggregateTypeKey = "aggregate_type"
 	eventTypeKey     = "event_type"
 	dataKey          = "data"
+	namespaceKey     = "namespace"
 )
 
 // HandleEvent implements the HandleEvent method of the eventhorizon.EventHandler interface.
@@ -127,14 +138,21 @@ func (b *EventBus) HandleEvent(ctx context.Context, event eh.Event) error {
 		return fmt.Errorf("could not marshal event: %w", err)
 	}
 
+	values := map[string]interface{}{
+		aggregateTypeKey: event.AggregateType().String(),
+		eventTypeKey:     event.EventType().String(),
+		dataKey:          data,
+	}
+
+	if b.useCustomPrefix {
+		values[namespaceKey] = eh.NamespaceFromContext(ctx)
+	}
+
 	args := &redis.XAddArgs{
 		Stream: b.streamName,
-		Values: map[string]interface{}{
-			aggregateTypeKey: event.AggregateType().String(),
-			eventTypeKey:     event.EventType().String(),
-			dataKey:          data,
-		},
+		Values: values,
 	}
+
 	if _, err := b.client.XAdd(ctx, args).Result(); err != nil {
 		return fmt.Errorf("could not publish event: %w", err)
 	}
@@ -279,6 +297,24 @@ func (b *EventBus) handler(m eh.EventMatcher, h eh.EventHandler, groupName strin
 			}
 
 			return
+		}
+
+		// use context with custom namespace
+		if b.useCustomPrefix {
+			namespace, ok := msg.Values[namespaceKey].(string)
+			if !ok {
+				err := fmt.Errorf("event namespace is of incorrect type %T", msg.Values[namespaceKey])
+				select {
+				case b.errCh <- &eh.EventBusError{Err: err, Ctx: ctx}:
+				default:
+					log.Printf("eventhorizon: missed error in Redis event bus: %s", err)
+				}
+
+				// TODO: Nack if possible.
+				return
+			}
+
+			ctx = eh.NewContextWithNameSpace(ctx, namespace)
 		}
 
 		// Handle the event if it did match.
