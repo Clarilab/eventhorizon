@@ -337,8 +337,13 @@ func (r *Repo) FindOneCustom(ctx context.Context, f func(context.Context, *mongo
 		}
 	}
 
+	entitiesCollection := r.entities
+	if r.useCustomPrefix {
+		entitiesCollection = r.collEntities(ctx)
+	}
+
 	entity := r.newEntity()
-	if err := f(ctx, r.entities).Decode(entity); err != nil {
+	if err := f(ctx, entitiesCollection).Decode(entity); err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			err = eh.ErrEntityNotFound
 		}
