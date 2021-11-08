@@ -25,6 +25,8 @@ _testmain.go
 *.coverprofile
 coverage.out
 
+*.DS_Store
+
 # CI
 .env
 
