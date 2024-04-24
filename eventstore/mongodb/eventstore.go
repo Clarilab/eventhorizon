@@ -33,14 +33,18 @@ import (
 	"github.com/looplab/eventhorizon/uuid"
 )
 
+const (
+	defaultCollectionName = "events"
+)
+
 // EventStore implements an eventhorizon.EventStore for MongoDB using a single
 // collection with one document per aggregate/stream which holds its events
 // as values.
 type EventStore struct {
-	client                *mongo.Client
+	client                eh.ClientFactory
 	clientOwnership       clientOwnership
-	db                    *mongo.Database
-	aggregates            *mongo.Collection
+	collection            eh.CollectionFactory
+	collectionName        string
 	eventHandlerAfterSave eh.EventHandler
 	eventHandlerInTX      eh.EventHandler
 }
@@ -64,35 +68,37 @@ func NewEventStore(uri, dbName string, options ...Option) (*EventStore, error) {
 		return nil, fmt.Errorf("could not connect to DB: %w", err)
 	}
 
-	return newEventStoreWithClient(client, internalClient, dbName, options...)
+	return newEventStoreWithFactory(eh.NewMongoDBFactory(client, dbName), internalClient, options...)
 }
 
 // NewEventStoreWithClient creates a new EventStore with a client.
 func NewEventStoreWithClient(client *mongo.Client, dbName string, options ...Option) (*EventStore, error) {
-	return newEventStoreWithClient(client, externalClient, dbName, options...)
+	return newEventStoreWithFactory(eh.NewMongoDBFactory(client, dbName), externalClient, options...)
 }
 
-func newEventStoreWithClient(client *mongo.Client, clientOwnership clientOwnership, dbName string, options ...Option) (*EventStore, error) {
-	if client == nil {
-		return nil, fmt.Errorf("missing DB client")
-	}
+func NewEventStoreWithFactory(dbFactory eh.MongoDBFactory, options ...Option) (*EventStore, error) {
+	return nil, nil
+}
 
-	db := client.Database(dbName)
+func newEventStoreWithFactory(dbFactory eh.MongoDBFactory, clientOwnership clientOwnership, options ...Option) (*EventStore, error) {
+	if dbFactory == nil {
+		return nil, fmt.Errorf("missing DB factory")
+	}
 
 	s := &EventStore{
-		client:          client,
+		client:          dbFactory.ClientFactory(),
 		clientOwnership: clientOwnership,
-		db:              db,
-		aggregates:      db.Collection("events"),
+		collection:      dbFactory.CollectionFactory(),
+		collectionName:  defaultCollectionName,
 	}
 
-	for _, option := range options {
-		if err := option(s); err != nil {
+	for i := range options {
+		if err := options[i](s); err != nil {
 			return nil, fmt.Errorf("error while applying option: %w", err)
 		}
 	}
 
-	if err := s.client.Ping(context.Background(), readpref.Primary()); err != nil {
+	if err := s.client().Ping(context.Background(), readpref.Primary()); err != nil {
 		return nil, fmt.Errorf("could not connect to MongoDB: %w", err)
 	}
 
@@ -147,7 +153,7 @@ func WithCollectionName(eventsColl string) Option {
 			return fmt.Errorf("missing collection name")
 		}
 
-		s.aggregates = s.db.Collection(eventsColl)
+		s.collectionName = eventsColl
 
 		return nil
 	}
@@ -229,14 +235,14 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 				Version:     len(dbEvents),
 				Events:      dbEvents,
 			}
-			if _, err := s.aggregates.InsertOne(ctx, aggregate); err != nil {
+			if _, err := s.collection(s.collectionName).InsertOne(ctx, aggregate); err != nil {
 				return fmt.Errorf("could not insert events (new): %w", err)
 			}
 		} else {
 			// Increment aggregate version on insert of new event record, and
 			// only insert if version of aggregate is matching (ie not changed
 			// since loading the aggregate).
-			if r, err := s.aggregates.UpdateOne(ctx,
+			if r, err := s.collection(s.collectionName).UpdateOne(ctx,
 				bson.M{
 					"_id":     id,
 					"version": originalVersion,
@@ -257,7 +263,7 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 
 	// Run the operation in a transaction if using an outbox, otherwise it's not needed.
 	if s.eventHandlerInTX != nil {
-		sess, err := s.client.StartSession(nil)
+		sess, err := s.client().StartSession(nil)
 		if err != nil {
 			return &eh.EventStoreError{
 				Err:              fmt.Errorf("could not start transaction: %w", err),
@@ -330,7 +336,7 @@ func (s *EventStore) Load(ctx context.Context, id uuid.UUID) ([]eh.Event, error)
 // LoadFrom loads all events from version for the aggregate id from the store.
 func (s *EventStore) LoadFrom(ctx context.Context, id uuid.UUID, version int) ([]eh.Event, error) {
 	var aggregate aggregateRecord
-	if err := s.aggregates.FindOne(ctx, bson.M{"_id": id}).Decode(&aggregate); err != nil {
+	if err := s.collection(s.collectionName).FindOne(ctx, bson.M{"_id": id}).Decode(&aggregate); err != nil {
 		// Translate to our own not found error.
 		if err == mongo.ErrNoDocuments {
 			err = eh.ErrAggregateNotFound
@@ -403,8 +409,11 @@ func (s *EventStore) Close() error {
 		return nil
 	}
 
-	return s.client.Disconnect(context.Background())
+	return s.client().Disconnect(context.Background())
 }
+
+// EventsCollectionName returns the name of the events collection.
+func (s *EventStore) EventsCollectionName() string { return s.collectionName }
 
 // aggregateRecord is the Database representation of an aggregate.
 type aggregateRecord struct {

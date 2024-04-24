@@ -34,7 +34,7 @@ func (s *EventStore) Replace(ctx context.Context, event eh.Event) error {
 
 	// First check if the aggregate exists, the not found error in the update
 	// query can mean both that the aggregate or the event is not found.
-	if n, err := s.aggregates.CountDocuments(ctx, bson.M{"_id": id}); n == 0 {
+	if n, err := s.collection(s.collectionName).CountDocuments(ctx, bson.M{"_id": id}); n == 0 {
 		return &eh.EventStoreError{
 			Err:              eh.ErrAggregateNotFound,
 			Op:               eh.EventStoreOpReplace,
@@ -61,7 +61,7 @@ func (s *EventStore) Replace(ctx context.Context, event eh.Event) error {
 	}
 
 	// Find and replace the event.
-	if r, err := s.aggregates.UpdateOne(ctx,
+	if r, err := s.collection(s.collectionName).UpdateOne(ctx,
 		bson.M{
 			"_id":            event.AggregateID(),
 			"events.version": event.Version(),
@@ -96,7 +96,7 @@ func (s *EventStore) Replace(ctx context.Context, event eh.Event) error {
 func (s *EventStore) RenameEvent(ctx context.Context, from, to eh.EventType) error {
 	// Find and rename all events.
 	// TODO: Maybe use change info.
-	if _, err := s.aggregates.UpdateMany(ctx,
+	if _, err := s.collection(s.collectionName).UpdateMany(ctx,
 		bson.M{
 			"events.event_type": from.String(),
 		},
@@ -115,7 +115,7 @@ func (s *EventStore) RenameEvent(ctx context.Context, from, to eh.EventType) err
 
 // Clear clears the event storage.
 func (s *EventStore) Clear(ctx context.Context) error {
-	if err := s.aggregates.Drop(ctx); err != nil {
+	if err := s.collection(s.collectionName).Drop(ctx); err != nil {
 		return &eh.EventStoreError{
 			Err: err,
 			Op:  eh.EventStoreOpRename,
