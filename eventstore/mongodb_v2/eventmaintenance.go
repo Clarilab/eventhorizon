@@ -33,7 +33,7 @@ func (s *EventStore) Replace(ctx context.Context, event eh.Event) error {
 	at := event.AggregateType()
 	av := event.Version()
 
-	sess, err := s.client.StartSession(nil)
+	sess, err := s.client().StartSession(nil)
 	if err != nil {
 		return &eh.EventStoreError{
 			Err:              fmt.Errorf("could not start transaction: %w", err),
@@ -50,7 +50,7 @@ func (s *EventStore) Replace(ctx context.Context, event eh.Event) error {
 	if _, err := sess.WithTransaction(ctx, func(txCtx mongo.SessionContext) (interface{}, error) {
 		// First check if the aggregate exists, the not found error in the update
 		// query can mean both that the aggregate or the event is not found.
-		if n, err := s.events.CountDocuments(ctx,
+		if n, err := s.collection(s.eventsCollectionName).CountDocuments(ctx,
 			bson.M{"aggregate_id": id}); n == 0 {
 			return nil, eh.ErrAggregateNotFound
 		} else if err != nil {
@@ -64,7 +64,7 @@ func (s *EventStore) Replace(ctx context.Context, event eh.Event) error {
 		}
 
 		// Copy the event position from the old event (and set in metadata).
-		res := s.events.FindOne(ctx, bson.M{
+		res := s.collection(s.eventsCollectionName).FindOne(ctx, bson.M{
 			"aggregate_id": event.AggregateID(),
 			"version":      event.Version(),
 		})
@@ -84,7 +84,7 @@ func (s *EventStore) Replace(ctx context.Context, event eh.Event) error {
 		e.Metadata["position"] = eventToReplace.Position
 
 		// Find and replace the event.
-		if r, err := s.events.ReplaceOne(ctx, bson.M{
+		if r, err := s.collection(s.eventsCollectionName).ReplaceOne(ctx, bson.M{
 			"aggregate_id": event.AggregateID(),
 			"version":      event.Version(),
 		}, e); err != nil {
@@ -112,7 +112,7 @@ func (s *EventStore) Replace(ctx context.Context, event eh.Event) error {
 func (s *EventStore) RenameEvent(ctx context.Context, from, to eh.EventType) error {
 	// Find and rename all events.
 	// TODO: Maybe use change info.
-	if _, err := s.events.UpdateMany(ctx,
+	if _, err := s.collection(s.eventsCollectionName).UpdateMany(ctx,
 		bson.M{
 			"event_type": from.String(),
 		},
@@ -131,13 +131,13 @@ func (s *EventStore) RenameEvent(ctx context.Context, from, to eh.EventType) err
 
 // Clear clears the event storage.
 func (s *EventStore) Clear(ctx context.Context) error {
-	if err := s.events.Drop(ctx); err != nil {
+	if err := s.collection(s.eventsCollectionName).Drop(ctx); err != nil {
 		return &eh.EventStoreError{
 			Err: fmt.Errorf("could not clear events collection: %w", err),
 		}
 	}
 
-	if err := s.streams.Drop(ctx); err != nil {
+	if err := s.collection(s.streamsCollectionName).Drop(ctx); err != nil {
 		return &eh.EventStoreError{
 			Err: fmt.Errorf("could not clear streams collection: %w", err),
 		}

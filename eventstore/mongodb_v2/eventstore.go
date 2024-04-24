@@ -40,15 +40,22 @@ import (
 	"github.com/looplab/eventhorizon/uuid"
 )
 
+const (
+	defaultEventsCollectionName    = "events"
+	defaultStreamsCollectionName   = "streams"
+	defaultSnapshotsCollectionName = "snapshots"
+)
+
 // EventStore is an eventhorizon.EventStore for MongoDB, using one collection
 // for all events and another to keep track of all aggregates/streams. It also
 // keeps track of the global position of events, stored as metadata.
 type EventStore struct {
-	client                  *mongo.Client
+	client                  eh.ClientFactory
 	clientOwnership         clientOwnership
-	events                  *mongo.Collection
-	streams                 *mongo.Collection
-	snapshots               *mongo.Collection
+	collection              eh.CollectionFactory
+	eventsCollectionName    string
+	streamsCollectionName   string
+	snapshotsCollectionName string
 	eventHandlerAfterSave   eh.EventHandler
 	eventHandlerInTX        eh.EventHandler
 	skipNonRegisteredEvents bool
@@ -73,69 +80,81 @@ func NewEventStore(uri, dbName string, options ...Option) (*EventStore, error) {
 		return nil, fmt.Errorf("could not connect to DB: %w", err)
 	}
 
-	return newEventStoreWithClient(client, internalClient, dbName, options...)
+	return newEventStoreWithFactory(eh.NewMongoDBFactory(client, dbName), internalClient, options...)
 }
 
 // NewEventStoreWithClient creates a new EventStore with a client.
 func NewEventStoreWithClient(client *mongo.Client, dbName string, options ...Option) (*EventStore, error) {
-	return newEventStoreWithClient(client, externalClient, dbName, options...)
+	return newEventStoreWithFactory(eh.NewMongoDBFactory(client, dbName), externalClient, options...)
 }
 
-func newEventStoreWithClient(client *mongo.Client, clientOwnership clientOwnership, dbName string, options ...Option) (*EventStore, error) {
-	if client == nil {
-		return nil, fmt.Errorf("missing DB client")
+// newEventStoreWithConnection creates a new EventStore with a factory.
+func NewEventStoreWithFactory(
+	dbFactory eh.MongoDBFactory,
+	options ...Option,
+) (*EventStore, error) {
+	return newEventStoreWithFactory(
+		dbFactory,
+		externalClient,
+		options...,
+	)
+}
+
+func newEventStoreWithFactory(dbFactory eh.MongoDBFactory, clientOwnership clientOwnership, options ...Option) (*EventStore, error) {
+	if dbFactory == nil {
+		return nil, fmt.Errorf("missing DB factory")
 	}
 
-	db := client.Database(dbName)
 	s := &EventStore{
-		client:          client,
-		clientOwnership: clientOwnership,
-		events:          db.Collection("events"),
-		streams:         db.Collection("streams"),
-		snapshots:       db.Collection("snapshots"),
+		client:                  dbFactory.ClientFactory(),
+		clientOwnership:         clientOwnership,
+		collection:              dbFactory.CollectionFactory(),
+		eventsCollectionName:    defaultEventsCollectionName,
+		streamsCollectionName:   defaultStreamsCollectionName,
+		snapshotsCollectionName: defaultSnapshotsCollectionName,
 	}
 
-	for _, option := range options {
-		if err := option(s); err != nil {
+	for i := range options {
+		if err := options[i](s); err != nil {
 			return nil, fmt.Errorf("error while applying option: %w", err)
 		}
 	}
 
-	if err := s.client.Ping(context.Background(), readpref.Primary()); err != nil {
+	if err := s.client().Ping(context.Background(), readpref.Primary()); err != nil {
 		return nil, fmt.Errorf("could not connect to MongoDB: %w", err)
 	}
 
 	ctx := context.Background()
 
-	if _, err := s.events.Indexes().CreateOne(ctx, mongo.IndexModel{
+	if _, err := s.collection(s.eventsCollectionName).Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.M{"aggregate_id": 1},
 	}); err != nil {
 		return nil, fmt.Errorf("could not ensure events index: %w", err)
 	}
 
-	if _, err := s.events.Indexes().CreateOne(ctx, mongo.IndexModel{
+	if _, err := s.collection(s.eventsCollectionName).Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.M{"version": 1},
 	}); err != nil {
 		return nil, fmt.Errorf("could not ensure events index: %w", err)
 	}
 
-	if _, err := s.snapshots.Indexes().CreateOne(ctx, mongo.IndexModel{
+	if _, err := s.collection(s.snapshotsCollectionName).Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.M{"aggregate_id": 1},
 	}); err != nil {
 		return nil, fmt.Errorf("could not ensure snapshot aggregate_id index: %w", err)
 	}
 
-	if _, err := s.snapshots.Indexes().CreateOne(ctx, mongo.IndexModel{
+	if _, err := s.collection(s.snapshotsCollectionName).Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.M{"version": 1},
 	}); err != nil {
 		return nil, fmt.Errorf("could not ensure snapshot version index: %w", err)
 	}
 
 	// Make sure the $all stream exists.
-	if err := s.streams.FindOne(ctx, bson.M{
+	if err := s.collection(s.streamsCollectionName).FindOne(ctx, bson.M{
 		"_id": "$all",
 	}).Err(); err == mongo.ErrNoDocuments {
-		if _, err := s.streams.InsertOne(ctx, bson.M{
+		if _, err := s.collection(s.streamsCollectionName).InsertOne(ctx, bson.M{
 			"_id":      "$all",
 			"position": 0,
 		}); err != nil {
@@ -201,9 +220,8 @@ func WithCollectionNames(eventsColl, streamsColl string) Option {
 			return fmt.Errorf("custom collection names are equal")
 		}
 
-		db := s.events.Database()
-		s.events = db.Collection(eventsColl)
-		s.streams = db.Collection(streamsColl)
+		s.eventsCollectionName = eventsColl
+		s.streamsCollectionName = streamsColl
 
 		return nil
 	}
@@ -216,8 +234,7 @@ func WithSnapshotCollectionName(snapshotColl string) Option {
 			return fmt.Errorf("snapshot collection: %w", err)
 		}
 
-		db := s.events.Database()
-		s.snapshots = db.Collection(snapshotColl)
+		s.snapshotsCollectionName = snapshotColl
 
 		return nil
 	}
@@ -283,7 +300,7 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 		dbEvents[i] = e
 	}
 
-	sess, err := s.client.StartSession(nil)
+	sess, err := s.client().StartSession(nil)
 	if err != nil {
 		return &eh.EventStoreError{
 			Err:              fmt.Errorf("could not start transaction: %w", err),
@@ -299,7 +316,7 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 
 	if _, err := sess.WithTransaction(ctx, func(txCtx mongo.SessionContext) (interface{}, error) {
 		// Fetch and increment global version in the all-stream.
-		r := s.streams.FindOneAndUpdate(txCtx,
+		r := s.collection(s.streamsCollectionName).FindOneAndUpdate(txCtx,
 			bson.M{"_id": "$all"},
 			bson.M{"$inc": bson.M{"position": len(dbEvents)}},
 		)
@@ -340,7 +357,7 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 		}
 
 		// Store events.
-		insert, err := s.events.InsertMany(txCtx, dbEvents)
+		insert, err := s.collection(s.eventsCollectionName).InsertMany(txCtx, dbEvents)
 		if err != nil {
 			return nil, fmt.Errorf("could not insert events: %w", err)
 		}
@@ -370,11 +387,11 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 
 		// Update the stream.
 		if originalVersion == 0 {
-			if _, err := s.streams.InsertOne(txCtx, strm); err != nil {
+			if _, err := s.collection(s.streamsCollectionName).InsertOne(txCtx, strm); err != nil {
 				return nil, fmt.Errorf("could not insert stream: %w", err)
 			}
 		} else {
-			if r, err := s.streams.UpdateOne(txCtx,
+			if r, err := s.collection(s.streamsCollectionName).UpdateOne(txCtx,
 				bson.M{
 					"_id":     strm.ID,
 					"version": originalVersion,
@@ -430,7 +447,7 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 
 // Load implements the Load method of the eventhorizon.EventStore interface.
 func (s *EventStore) Load(ctx context.Context, id uuid.UUID) ([]eh.Event, error) {
-	cursor, err := s.events.Find(ctx, bson.M{"aggregate_id": id})
+	cursor, err := s.collection(s.eventsCollectionName).Find(ctx, bson.M{"aggregate_id": id})
 	if err != nil {
 		return nil, &eh.EventStoreError{
 			Err:         fmt.Errorf("could not find event: %w", err),
@@ -444,7 +461,7 @@ func (s *EventStore) Load(ctx context.Context, id uuid.UUID) ([]eh.Event, error)
 
 // LoadFrom implements LoadFrom method of the eventhorizon.SnapshotStore interface.
 func (s *EventStore) LoadFrom(ctx context.Context, id uuid.UUID, version int) ([]eh.Event, error) {
-	cursor, err := s.events.Find(ctx, bson.M{"aggregate_id": id, "version": bson.M{"$gte": version}})
+	cursor, err := s.collection(s.eventsCollectionName).Find(ctx, bson.M{"aggregate_id": id, "version": bson.M{"$gte": version}})
 	if err != nil {
 		return nil, &eh.EventStoreError{
 			Err:         fmt.Errorf("could not find event: %w", err),
@@ -524,7 +541,7 @@ func (s *EventStore) loadFromCursor(ctx context.Context, id uuid.UUID, cursor *m
 }
 
 func (s *EventStore) LoadSnapshot(ctx context.Context, id uuid.UUID) (*eh.Snapshot, error) {
-	result := s.snapshots.FindOne(ctx, bson.M{"aggregate_id": id}, options.FindOne().SetSort(bson.M{"version": -1}))
+	result := s.collection(s.snapshotsCollectionName).FindOne(ctx, bson.M{"aggregate_id": id}, options.FindOne().SetSort(bson.M{"version": -1}))
 	if err := result.Err(); err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
@@ -612,7 +629,7 @@ func (s *EventStore) SaveSnapshot(ctx context.Context, id uuid.UUID, snapshot eh
 		}
 	}
 
-	if _, err := s.snapshots.InsertOne(ctx,
+	if _, err := s.collection(s.snapshotsCollectionName).InsertOne(ctx,
 		record,
 		options.InsertOne(),
 	); err != nil {
@@ -633,8 +650,17 @@ func (s *EventStore) Close() error {
 		return nil
 	}
 
-	return s.client.Disconnect(context.Background())
+	return s.client().Disconnect(context.Background())
 }
+
+// EventsCollectionName returns the name of the events collection.
+func (s *EventStore) EventsCollectionName() string { return s.eventsCollectionName }
+
+// StreamsCollectionName returns the name of the streams collection.
+func (s *EventStore) StreamsCollectionName() string { return s.streamsCollectionName }
+
+// SnapshotsCollectionName returns the name of the snapshots collection.
+func (s *EventStore) SnapshotsCollectionName() string { return s.snapshotsCollectionName }
 
 type SnapshotRecord struct {
 	AggregateID   uuid.UUID        `bson:"aggregate_id"`
