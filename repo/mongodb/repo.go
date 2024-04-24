@@ -29,9 +29,14 @@ import (
 
 	// Register uuid.UUID as BSON type.
 	_ "github.com/looplab/eventhorizon/codec/bson"
+	"github.com/looplab/eventhorizon/mongoutils"
 
 	eh "github.com/looplab/eventhorizon"
 	"github.com/looplab/eventhorizon/uuid"
+)
+
+const (
+	defaultCollectionName = "repository"
 )
 
 var (
@@ -43,9 +48,10 @@ var (
 
 // Repo implements an MongoDB repository for entities.
 type Repo struct {
-	client          *mongo.Client
+	client          eh.ClientFactory
 	clientOwnership clientOwnership
-	entities        *mongo.Collection
+	collection      eh.CollectionFactory
+	collectionName  string
 	newEntity       func() eh.Entity
 	connectionCheck bool
 }
@@ -58,7 +64,7 @@ const (
 )
 
 // NewRepo creates a new Repo.
-func NewRepo(uri, dbName, collection string, options ...Option) (*Repo, error) {
+func NewRepo(uri, dbName string, options ...Option) (*Repo, error) {
 	opts := mongoOptions.Client().ApplyURI(uri)
 	opts.SetWriteConcern(writeconcern.New(writeconcern.WMajority()))
 	opts.SetReadConcern(readconcern.Majority())
@@ -69,33 +75,39 @@ func NewRepo(uri, dbName, collection string, options ...Option) (*Repo, error) {
 		return nil, fmt.Errorf("could not connect to DB: %w", err)
 	}
 
-	return newRepoWithClient(client, internalClient, dbName, collection, options...)
+	return newRepoWithFactory(eh.NewMongoDBFactory(client, dbName), internalClient, options...)
 }
 
 // NewRepoWithClient creates a new Repo with a client.
-func NewRepoWithClient(client *mongo.Client, dbName, collection string, options ...Option) (*Repo, error) {
-	return newRepoWithClient(client, externalClient, dbName, collection, options...)
+func NewRepoWithClient(client *mongo.Client, dbName string, options ...Option) (*Repo, error) {
+	return newRepoWithFactory(eh.NewMongoDBFactory(client, dbName), externalClient, options...)
 }
 
-func newRepoWithClient(client *mongo.Client, clientOwnership clientOwnership, dbName, collection string, options ...Option) (*Repo, error) {
-	if client == nil {
-		return nil, fmt.Errorf("missing DB client")
+// NewRepoWithFactory creates a new Repo with a connection.
+func NewRepoWithFactory(dbFactory eh.MongoDBFactory, options ...Option) (*Repo, error) {
+	return newRepoWithFactory(dbFactory, externalClient, options...)
+}
+
+func newRepoWithFactory(dbFactory eh.MongoDBFactory, clientOwnership clientOwnership, options ...Option) (*Repo, error) {
+	if dbFactory == nil {
+		return nil, fmt.Errorf("missing DB factory")
 	}
 
 	r := &Repo{
-		client:          client,
+		client:          dbFactory.ClientFactory(),
 		clientOwnership: clientOwnership,
-		entities:        client.Database(dbName).Collection(collection),
+		collection:      dbFactory.CollectionFactory(),
+		collectionName:  defaultCollectionName,
 	}
 
-	for _, option := range options {
-		if err := option(r); err != nil {
+	for i := range options {
+		if err := options[i](r); err != nil {
 			return nil, fmt.Errorf("error while applying option: %w", err)
 		}
 	}
 
 	if r.connectionCheck {
-		if err := r.client.Ping(context.Background(), readpref.Primary()); err != nil {
+		if err := r.client().Ping(context.Background(), readpref.Primary()); err != nil {
 			return nil, fmt.Errorf("could not connect to MongoDB: %w", err)
 		}
 	}
@@ -110,6 +122,19 @@ type Option func(*Repo) error
 func WithConnectionCheck(h eh.EventHandler) Option {
 	return func(r *Repo) error {
 		r.connectionCheck = true
+
+		return nil
+	}
+}
+
+// WithCollectionName uses different collections from the default "repository" collection.
+func WithCollectionName(collection string) Option {
+	return func(s *Repo) error {
+		if err := mongoutils.CheckCollectionName(collection); err != nil {
+			return fmt.Errorf("repository collection: %w", err)
+		}
+
+		s.collectionName = collection
 
 		return nil
 	}
@@ -145,7 +170,7 @@ func (r *Repo) Find(ctx context.Context, id uuid.UUID) (eh.Entity, error) {
 	}
 
 	entity := r.newEntity()
-	if err := r.entities.FindOne(ctx, bson.M{"_id": id.String()}).Decode(entity); err != nil {
+	if err := r.collection(r.collectionName).FindOne(ctx, bson.M{"_id": id.String()}).Decode(entity); err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			err = eh.ErrEntityNotFound
 		}
@@ -169,7 +194,7 @@ func (r *Repo) FindAll(ctx context.Context) ([]eh.Entity, error) {
 		}
 	}
 
-	cursor, err := r.entities.Find(ctx, bson.M{})
+	cursor, err := r.collection(r.collectionName).Find(ctx, bson.M{})
 	if err != nil {
 		return nil, &eh.RepoError{
 			Err: fmt.Errorf("could not find: %w", err),
@@ -242,7 +267,7 @@ func (r *Repo) FindCustomIter(ctx context.Context, f func(context.Context, *mong
 		}
 	}
 
-	cursor, err := f(ctx, r.entities)
+	cursor, err := f(ctx, r.collection(r.collectionName))
 	if err != nil {
 		return nil, &eh.RepoError{
 			Err: fmt.Errorf("could not find: %w", err),
@@ -276,7 +301,7 @@ func (r *Repo) FindCustom(ctx context.Context, f func(context.Context, *mongo.Co
 		}
 	}
 
-	cursor, err := f(ctx, r.entities)
+	cursor, err := f(ctx, r.collection(r.collectionName))
 	if err != nil {
 		return nil, &eh.RepoError{
 			Err: fmt.Errorf("could not find: %w", err),
@@ -326,7 +351,7 @@ func (r *Repo) FindOneCustom(ctx context.Context, f func(context.Context, *mongo
 	}
 
 	entity := r.newEntity()
-	if err := f(ctx, r.entities).Decode(entity); err != nil {
+	if err := f(ctx, r.collection(r.collectionName)).Decode(entity); err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			err = eh.ErrEntityNotFound
 		}
@@ -350,7 +375,7 @@ func (r *Repo) Save(ctx context.Context, entity eh.Entity) error {
 		}
 	}
 
-	if _, err := r.entities.UpdateOne(ctx,
+	if _, err := r.collection(r.collectionName).UpdateOne(ctx,
 		bson.M{
 			"_id": id.String(),
 		},
@@ -371,7 +396,7 @@ func (r *Repo) Save(ctx context.Context, entity eh.Entity) error {
 
 // Remove implements the Remove method of the eventhorizon.WriteRepo interface.
 func (r *Repo) Remove(ctx context.Context, id uuid.UUID) error {
-	if r, err := r.entities.DeleteOne(ctx, bson.M{"_id": id.String()}); err != nil {
+	if r, err := r.collection(r.collectionName).DeleteOne(ctx, bson.M{"_id": id.String()}); err != nil {
 		return &eh.RepoError{
 			Err:      err,
 			Op:       eh.RepoOpRemove,
@@ -390,7 +415,7 @@ func (r *Repo) Remove(ctx context.Context, id uuid.UUID) error {
 
 // Collection lets the function do custom actions on the collection.
 func (r *Repo) Collection(ctx context.Context, f func(context.Context, *mongo.Collection) error) error {
-	if err := f(ctx, r.entities); err != nil {
+	if err := f(ctx, r.collection(r.collectionName)); err != nil {
 		return &eh.RepoError{
 			Err: err,
 		}
@@ -402,7 +427,7 @@ func (r *Repo) Collection(ctx context.Context, f func(context.Context, *mongo.Co
 // CreateIndex creates an index for a field.
 func (r *Repo) CreateIndex(ctx context.Context, field string) error {
 	index := mongo.IndexModel{Keys: bson.M{field: 1}}
-	if _, err := r.entities.Indexes().CreateOne(ctx, index); err != nil {
+	if _, err := r.collection(r.collectionName).Indexes().CreateOne(ctx, index); err != nil {
 		return fmt.Errorf("could not create index: %s", err)
 	}
 
@@ -416,7 +441,7 @@ func (r *Repo) SetEntityFactory(f func() eh.Entity) {
 
 // Clear clears the read model database.
 func (r *Repo) Clear(ctx context.Context) error {
-	if err := r.entities.Drop(ctx); err != nil {
+	if err := r.collection(r.collectionName).Drop(ctx); err != nil {
 		return &eh.RepoError{
 			Err: fmt.Errorf("could not drop collection: %w", err),
 			Op:  eh.RepoOpClear,
@@ -433,5 +458,5 @@ func (r *Repo) Close() error {
 		return nil
 	}
 
-	return r.client.Disconnect(context.Background())
+	return r.client().Disconnect(context.Background())
 }
