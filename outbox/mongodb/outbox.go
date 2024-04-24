@@ -22,32 +22,38 @@ import (
 	eh "github.com/looplab/eventhorizon"
 )
 
-var (
+const (
+	defaultCollectionName = "outbox"
+
 	// Interval in which to do a sweep of various unprocessed events.
-	PeriodicSweepInterval = 15 * time.Second
+	defaultPeriodicSweepInterval = 15 * time.Second
 
 	// Settings for how old different kind of unprocessed events needs to be
 	// to be processed by the periodic sweep.
-	PeriodicSweepAge   = 15 * time.Second
-	PeriodicCleanupAge = 10 * time.Minute
+	defaultPeriodicSweepAge   = 15 * time.Second
+	defaultPeriodicCleanupAge = 10 * time.Minute
 )
 
 // Outbox implements an eventhorizon.Outbox for MongoDB.
 type Outbox struct {
-	client          *mongo.Client
-	clientOwnership clientOwnership
-	outbox          *mongo.Collection
-	handlers        []*matcherHandler
-	handlersByType  map[eh.EventHandlerType]*matcherHandler
-	handlersMu      sync.RWMutex
-	errCh           chan error
-	watchToken      string
-	resumeToken     bson.Raw
-	processingMu    sync.Mutex
-	cctx            context.Context
-	cancel          context.CancelFunc
-	wg              sync.WaitGroup
-	codec           eh.EventCodec
+	client                eh.ClientFactory
+	clientOwnership       clientOwnership
+	collection            eh.CollectionFactory
+	collectionName        string
+	handlers              []*matcherHandler
+	handlersByType        map[eh.EventHandlerType]*matcherHandler
+	handlersMu            sync.RWMutex
+	errCh                 chan error
+	watchToken            string
+	resumeToken           bson.Raw
+	processingMu          sync.Mutex
+	cctx                  context.Context
+	cancel                context.CancelFunc
+	wg                    sync.WaitGroup
+	codec                 eh.EventCodec
+	periodicSweepInterval time.Duration
+	periodicSweepAge      time.Duration
+	periodicCleanupAge    time.Duration
 }
 
 type clientOwnership int
@@ -74,39 +80,63 @@ func NewOutbox(uri, dbName string, options ...Option) (*Outbox, error) {
 		return nil, fmt.Errorf("could not connect to DB: %w", err)
 	}
 
-	return newOutboxWithClient(client, internalClient, dbName, options...)
+	return newOutboxWithFactory(
+		eh.NewMongoDBFactory(client, dbName),
+		internalClient,
+		options...,
+	)
 }
 
 // NewOutboxWithClient creates a new Outbox with a client.
 func NewOutboxWithClient(client *mongo.Client, dbName string, options ...Option) (*Outbox, error) {
-	return newOutboxWithClient(client, externalClient, dbName, options...)
+	return newOutboxWithFactory(
+		eh.NewMongoDBFactory(client, dbName),
+		externalClient,
+		options...,
+	)
 }
 
-func newOutboxWithClient(client *mongo.Client, clientOwnership clientOwnership, dbName string, options ...Option) (*Outbox, error) {
-	if client == nil {
-		return nil, fmt.Errorf("missing DB client")
+// NewOutboxWithFactory creates a new Outbox with a factory.
+func NewOutboxWithFactory(
+	dbFactory eh.MongoDBFactory,
+	options ...Option,
+) (*Outbox, error) {
+	return newOutboxWithFactory(
+		dbFactory,
+		externalClient,
+		options...,
+	)
+}
+
+func newOutboxWithFactory(dbFactory eh.MongoDBFactory, clientOwnership clientOwnership, options ...Option) (*Outbox, error) {
+	if dbFactory == nil {
+		return nil, fmt.Errorf("missing DB factory")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	o := &Outbox{
-		client:          client,
-		clientOwnership: clientOwnership,
-		outbox:          client.Database(dbName).Collection("outbox"),
-		handlersByType:  map[eh.EventHandlerType]*matcherHandler{},
-		errCh:           make(chan error, 100),
-		cctx:            ctx,
-		cancel:          cancel,
-		codec:           &bsonCodec.EventCodec{},
+		client:                dbFactory.ClientFactory(),
+		clientOwnership:       clientOwnership,
+		collection:            dbFactory.CollectionFactory(),
+		collectionName:        defaultCollectionName,
+		handlersByType:        map[eh.EventHandlerType]*matcherHandler{},
+		errCh:                 make(chan error, 100),
+		cctx:                  ctx,
+		cancel:                cancel,
+		codec:                 &bsonCodec.EventCodec{},
+		periodicSweepInterval: defaultPeriodicSweepInterval,
+		periodicSweepAge:      defaultPeriodicSweepAge,
+		periodicCleanupAge:    defaultPeriodicCleanupAge,
 	}
 
-	for _, option := range options {
-		if err := option(o); err != nil {
+	for i := range options {
+		if err := options[i](o); err != nil {
 			return nil, fmt.Errorf("error while applying option: %w", err)
 		}
 	}
 
-	if err := o.client.Ping(context.Background(), readpref.Primary()); err != nil {
+	if err := o.client().Ping(context.Background(), readpref.Primary()); err != nil {
 		return nil, fmt.Errorf("could not connect to MongoDB: %w", err)
 	}
 
@@ -135,7 +165,37 @@ func WithCollectionName(outboxColl string) Option {
 			return fmt.Errorf("outbox collection: %w", err)
 		}
 
-		s.outbox = s.outbox.Database().Collection(outboxColl)
+		s.collectionName = outboxColl
+
+		return nil
+	}
+}
+
+// WithPeriodicSweepInterval sets the interval at which the periodic sweep is run.
+// The default value is 15 seconds.
+func WithPeriodicSweepInterval(interval time.Duration) Option {
+	return func(o *Outbox) error {
+		o.periodicSweepInterval = interval
+
+		return nil
+	}
+}
+
+// WithPeriodicSweepAge sets the age at which the periodic sweep is run.
+// The default value is 15 seconds.
+func WithPeriodicSweepAge(age time.Duration) Option {
+	return func(o *Outbox) error {
+		o.periodicSweepAge = age
+
+		return nil
+	}
+}
+
+// WithPeriodicCleanupAge sets the age at which the periodic cleanup is run.
+// The default value is 10 minutes.
+func WithPeriodicCleanupAge(age time.Duration) Option {
+	return func(o *Outbox) error {
+		o.periodicCleanupAge = age
 
 		return nil
 	}
@@ -144,7 +204,7 @@ func WithCollectionName(outboxColl string) Option {
 // Client returns the MongoDB client used by the outbox. To use the outbox with
 // the EventStore it needs to be created with the same client.
 func (o *Outbox) Client() *mongo.Client {
-	return o.client
+	return o.client()
 }
 
 // HandlerType implements the HandlerType method of the eventhorizon.EventHandler interface.
@@ -175,6 +235,9 @@ func (o *Outbox) AddHandler(_ context.Context, m eh.EventMatcher, h eh.EventHand
 
 	return nil
 }
+
+// OutboxCollectionName return the name of the outbox collection.
+func (o *Outbox) OutboxCollectionName() string { return o.collectionName }
 
 // Returns an added handler and matcher for a handler type.
 func (o *Outbox) handler(handlerType string) (*matcherHandler, bool) {
@@ -223,7 +286,7 @@ func (o *Outbox) HandleEvent(ctx context.Context, event eh.Event) error {
 		r.WatchToken = o.watchToken
 	}
 
-	if _, err := o.outbox.InsertOne(ctx, r); err != nil {
+	if _, err := o.collection(o.collectionName).InsertOne(ctx, r); err != nil {
 		return fmt.Errorf("could not queue event: %w", err)
 	}
 
@@ -235,7 +298,7 @@ func (o *Outbox) Start() {
 	o.wg.Add(2)
 
 	go o.runPeriodicallyUntilCancelled(o.processWithWatch, time.Second)
-	go o.runPeriodicallyUntilCancelled(o.processFullOutbox, PeriodicSweepInterval)
+	go o.runPeriodicallyUntilCancelled(o.processFullOutbox, o.periodicSweepInterval)
 }
 
 // Close implements the Close method of the eventhorizon.EventBus interface.
@@ -248,7 +311,7 @@ func (o *Outbox) Close() error {
 		return nil
 	}
 
-	return o.client.Disconnect(context.Background())
+	return o.client().Disconnect(context.Background())
 }
 
 // Errors implements the Errors method of the eventhorizon.EventBus interface.
@@ -295,7 +358,7 @@ func (o *Outbox) processWithWatch(ctx context.Context) error {
 		match["fullDocument.watch_token"] = o.watchToken
 	}
 
-	stream, err := o.outbox.Watch(ctx, mongo.Pipeline{bson.D{{"$match", match}}}, opts)
+	stream, err := o.collection(o.collectionName).Watch(ctx, mongo.Pipeline{bson.D{{"$match", match}}}, opts)
 	if err != nil {
 		return fmt.Errorf("could not watch outbox: %w", err)
 	}
@@ -362,9 +425,9 @@ func (o *Outbox) processFullOutbox(ctx context.Context) error {
 
 	// Take started but non-finished events after 15 sec,
 	// or non-started events after 10 min.
-	cur, err := o.outbox.Find(ctx, bson.M{"$or": bson.A{
-		bson.M{"taken_at": bson.M{"$lt": now.Add(-PeriodicSweepAge)}},
-		bson.M{"taken_at": nil, "created_at": bson.M{"$lt": now.Add(-PeriodicCleanupAge)}},
+	cur, err := o.collection(o.collectionName).Find(ctx, bson.M{"$or": bson.A{
+		bson.M{"taken_at": bson.M{"$lt": now.Add(-o.periodicSweepAge)}},
+		bson.M{"taken_at": nil, "created_at": bson.M{"$lt": now.Add(-o.periodicCleanupAge)}},
 	}})
 	if err != nil {
 		return fmt.Errorf("could not find outbox event: %w", err)
@@ -396,12 +459,12 @@ func (o *Outbox) processOutboxEvent(ctx context.Context, r *outboxDoc, now time.
 		}
 	}
 
-	if res, err := o.outbox.UpdateOne(ctx, bson.M{
+	if res, err := o.collection(o.collectionName).UpdateOne(ctx, bson.M{
 		"_id": r.ID,
 		"$or": bson.A{
 			bson.M{"taken_at": nil},
-			bson.M{"taken_at": bson.M{"$lt": now.Add(-PeriodicSweepAge)}},
-			bson.M{"taken_at": nil, "created_at": bson.M{"$lt": now.Add(-PeriodicCleanupAge)}},
+			bson.M{"taken_at": bson.M{"$lt": now.Add(-o.periodicSweepAge)}},
+			bson.M{"taken_at": nil, "created_at": bson.M{"$lt": now.Add(-o.periodicCleanupAge)}},
 		}},
 		bson.M{"$set": bson.M{"taken_at": now}},
 	); err != nil {
@@ -440,7 +503,7 @@ func (o *Outbox) processOutboxEvent(ctx context.Context, r *outboxDoc, now time.
 	}
 
 	if len(processedHandlers) == len(r.Handlers) {
-		if _, err := o.outbox.DeleteOne(ctx,
+		if _, err := o.collection(o.collectionName).DeleteOne(ctx,
 			bson.M{"_id": r.ID},
 		); err != nil {
 			return &eh.OutboxError{
@@ -450,7 +513,7 @@ func (o *Outbox) processOutboxEvent(ctx context.Context, r *outboxDoc, now time.
 			}
 		}
 	} else if len(processedHandlers) > 0 {
-		if res, err := o.outbox.UpdateOne(ctx,
+		if res, err := o.collection(o.collectionName).UpdateOne(ctx,
 			bson.M{"_id": r.ID},
 			bson.M{"$pullAll": bson.M{"handlers": bson.A(processedHandlers)}},
 		); err != nil {
