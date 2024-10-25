@@ -105,6 +105,7 @@ type EventHandler struct {
 	useWait                bool
 	useRetryOnce           bool
 	useIrregularVersioning bool
+	useDecoupledEntity     bool
 	entityLookupFn         func(eh.Event) uuid.UUID
 }
 
@@ -152,6 +153,17 @@ func WithIrregularVersioning() Option {
 	}
 }
 
+// WithDecoupledEntity sets the option to allow a decoupled entity.
+// This allows an entity to have different events.
+// This is like the WithIrregularVersioning but also allows the new (projected) entity to have a different version than the aggregate.
+// This can be useful for projectors that project only some events of a larger
+// aggregate, which will lead to gaps in the versions.
+func WithDecoupledEntity() Option {
+	return func(h *EventHandler) {
+		h.useDecoupledEntity = true
+	}
+}
+
 // WithEntityLookup can be used to provide an alternative ID (from the aggregate ID)
 // for fetching the projected entity. The lookup func can for example extract
 // another field from the event or use a static ID for some singleton-like projections.
@@ -188,7 +200,7 @@ retryOnce:
 
 	findCtx := ctx
 	// Irregular versioning skips min version loading.
-	if !h.useIrregularVersioning {
+	if !h.useIrregularVersioning && !h.useDecoupledEntity {
 		// Try to find it with a min version (and optional retry) if the
 		// underlying repo supports it.
 		findCtx = version.NewContextWithMinVersion(ctx, event.Version()-1)
@@ -251,7 +263,7 @@ retryOnce:
 		}
 
 		// Irregular versioning has looser checks on the version.
-		if event.Version() != entityVersion+1 && !h.useIrregularVersioning {
+		if event.Version() != entityVersion+1 && !h.useIrregularVersioning && !h.useDecoupledEntity {
 			if h.useRetryOnce && !triedOnce {
 				triedOnce = true
 
@@ -293,7 +305,7 @@ retryOnce:
 	}
 
 	// The model should now be at the same version as the event.
-	if newEntity, ok := newEntity.(eh.Versionable); ok {
+	if newEntity, ok := newEntity.(eh.Versionable); ok && !h.useDecoupledEntity {
 		entityVersion = newEntity.AggregateVersion()
 
 		if newEntity.AggregateVersion() != event.Version() {
