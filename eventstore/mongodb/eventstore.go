@@ -291,9 +291,9 @@ func (s *EventStore) LoadFrom(ctx context.Context, id uuid.UUID, version int) ([
 		"events": bson.M{
 			"$filter": bson.M{
 				"input": "$events",
-				"as":    "events",
+				"as":    "event",
 				"cond": bson.M{
-					"version": bson.M{"$gte": version},
+					"$gte": bson.A{"$$event.version", version},
 				},
 			},
 		},
