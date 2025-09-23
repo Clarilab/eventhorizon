@@ -35,7 +35,7 @@ import (
 	"github.com/Clarilab/eventhorizon/examples/guestlist/domains/guestlist"
 )
 
-func ExampleIntegration() {
+func Example() {
 	if testing.Short() {
 		// Skip test when not running integration, fake success by printing.
 		fmt.Println(`invitation: Athena - confirmed

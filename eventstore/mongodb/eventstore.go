@@ -299,7 +299,7 @@ func (s *EventStore) LoadFrom(ctx context.Context, id uuid.UUID, version int) ([
 				"input": "$events",
 				"as":    "events",
 				"cond": bson.M{
-					"version": bson.M{"$gte": version},
+					"$gte": []interface{}{"$$events.version", version},
 				},
 			},
 		},
@@ -318,7 +318,7 @@ func (s *EventStore) LoadUntil(ctx context.Context, id uuid.UUID, version int) (
 				"input": "$events",
 				"as":    "events",
 				"cond": bson.M{
-					"version": bson.M{"$lte": version},
+					"$lte": []interface{}{"$$events.version", version},
 				},
 			},
 		},
