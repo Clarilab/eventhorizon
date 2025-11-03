@@ -77,7 +77,7 @@ func WithUseAtomic() Option {
 func (h *CommandHandler) HandleCommand(ctx context.Context, cmd eh.Command) error {
 	if h.useAtomic {
 		h.rwMutex.RLock()
-		_, ok := h.a[cmd.AggregateType().String()]
+		_, ok := h.a[cmd.AggregateID().String()]
 		h.rwMutex.RUnlock()
 
 		if !ok {
