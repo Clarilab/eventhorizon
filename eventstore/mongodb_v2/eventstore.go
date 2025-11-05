@@ -53,7 +53,7 @@ type EventStore struct {
 	streamsCollectionName   string
 	snapshotsCollectionName string
 	eventHandlerAfterSave   eh.EventHandler
-	eventHandlerInTX        eh.EventHandler
+	eventHandlersInTX       []eh.EventHandler
 }
 
 type dbOwnership int
@@ -332,12 +332,8 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 			}
 		}
 
-		if s.eventHandlerInTX != nil {
-			for i := range events {
-				if err := s.eventHandlerInTX.HandleEvent(ctx, events[i]); err != nil {
-					return fmt.Errorf("could not handle event: %w", err)
-				}
-			}
+		if err := s.runEventHandlersInTX(txCtx, events); err != nil {
+			return err
 		}
 
 		return nil
@@ -360,6 +356,22 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 					Err:   err,
 					Event: events[i],
 				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func (s *EventStore) runEventHandlersInTX(ctx context.Context, events []eh.Event) error {
+	for _, handler := range s.eventHandlersInTX {
+		if handler == nil {
+			continue
+		}
+
+		for _, event := range events {
+			if err := handler.HandleEvent(ctx, event); err != nil {
+				return fmt.Errorf("could not handle event: %w", err)
 			}
 		}
 	}
