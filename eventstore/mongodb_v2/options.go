@@ -18,7 +18,7 @@ func WithEventHandler(h eh.EventHandler) Option {
 			return fmt.Errorf("another event handler is already set")
 		}
 
-		if s.eventHandlerInTX != nil {
+		if len(s.eventHandlersInTX) > 0 {
 			return fmt.Errorf("another TX event handler is already set")
 		}
 
@@ -38,11 +38,30 @@ func WithEventHandlerInTX(h eh.EventHandler) Option {
 			return fmt.Errorf("another event handler is already set")
 		}
 
-		if s.eventHandlerInTX != nil {
+		if len(s.eventHandlersInTX) > 0 {
 			return fmt.Errorf("another TX event handler is already set")
 		}
 
-		s.eventHandlerInTX = h
+		s.eventHandlersInTX = append(s.eventHandlersInTX, h)
+
+		return nil
+	}
+}
+
+// WithEventHandlersInTX adds event handlers that will be called during saving of
+// events. For an event handler, that also uses mongodb, to be atomic it needs to use
+// the same transaction as the save operation, which is passed down using the context.
+func WithEventHandlersInTX(h ...eh.EventHandler) Option {
+	return func(s *EventStore) error {
+		if s.eventHandlerAfterSave != nil {
+			return fmt.Errorf("another event handler is already set")
+		}
+
+		if len(s.eventHandlersInTX) > 0 {
+			return fmt.Errorf("another TX event handler is already set")
+		}
+
+		s.eventHandlersInTX = append(s.eventHandlersInTX, h...)
 
 		return nil
 	}
