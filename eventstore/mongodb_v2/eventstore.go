@@ -52,7 +52,7 @@ type EventStore struct {
 	eventsCollectionName    string
 	streamsCollectionName   string
 	snapshotsCollectionName string
-	eventHandlerAfterSave   eh.EventHandler
+	eventHandlers           []eh.EventHandler
 	eventHandlersInTX       []eh.EventHandler
 }
 
@@ -332,7 +332,8 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 			}
 		}
 
-		if err := s.runEventHandlersInTX(txCtx, events); err != nil {
+		// Let the optional in-TX event handlers handle the events.
+		if err := runEventHandlers(txCtx, s.eventHandlersInTX, events); err != nil {
 			return err
 		}
 
@@ -348,30 +349,26 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 		}
 	}
 
-	// Let the optional event handler handle the events.
-	if s.eventHandlerAfterSave != nil {
-		for i := range events {
-			if err := s.eventHandlerAfterSave.HandleEvent(ctx, events[i]); err != nil {
-				return &eh.EventHandlerError{
-					Err:   err,
-					Event: events[i],
-				}
-			}
-		}
+	// Let the optional event handlers handle the events.
+	if err := runEventHandlers(ctx, s.eventHandlers, events); err != nil {
+		return err
 	}
 
 	return nil
 }
 
-func (s *EventStore) runEventHandlersInTX(ctx context.Context, events []eh.Event) error {
-	for _, handler := range s.eventHandlersInTX {
+func runEventHandlers(ctx context.Context, handlers []eh.EventHandler, events []eh.Event) error {
+	for _, handler := range handlers {
 		if handler == nil {
 			continue
 		}
 
 		for _, event := range events {
 			if err := handler.HandleEvent(ctx, event); err != nil {
-				return fmt.Errorf("could not handle event: %w", err)
+				return &eh.EventHandlerError{
+					Err:   err,
+					Event: event,
+				}
 			}
 		}
 	}
