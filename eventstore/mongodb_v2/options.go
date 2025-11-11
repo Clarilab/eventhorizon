@@ -14,15 +14,25 @@ type Option func(*EventStore) error
 // An example would be to add an event bus to publish events.
 func WithEventHandler(h eh.EventHandler) Option {
 	return func(s *EventStore) error {
-		if s.eventHandlerAfterSave != nil {
+		if len(s.eventHandlers) > 0 {
 			return fmt.Errorf("another event handler is already set")
 		}
 
-		if len(s.eventHandlersInTX) > 0 {
-			return fmt.Errorf("another TX event handler is already set")
+		s.eventHandlers = append(s.eventHandlers, h)
+
+		return nil
+	}
+}
+
+// WithEventHandlers adds event handlers that will be called after saving events.
+// An example would be to add an event bus to publish events.
+func WithEventHandlers(h ...eh.EventHandler) Option {
+	return func(s *EventStore) error {
+		if len(s.eventHandlers) > 0 {
+			return fmt.Errorf("another event handler is already set")
 		}
 
-		s.eventHandlerAfterSave = h
+		s.eventHandlers = append(s.eventHandlers, h...)
 
 		return nil
 	}
@@ -34,10 +44,6 @@ func WithEventHandler(h eh.EventHandler) Option {
 // operation, which is passed down using the context.
 func WithEventHandlerInTX(h eh.EventHandler) Option {
 	return func(s *EventStore) error {
-		if s.eventHandlerAfterSave != nil {
-			return fmt.Errorf("another event handler is already set")
-		}
-
 		if len(s.eventHandlersInTX) > 0 {
 			return fmt.Errorf("another TX event handler is already set")
 		}
@@ -53,10 +59,6 @@ func WithEventHandlerInTX(h eh.EventHandler) Option {
 // the same transaction as the save operation, which is passed down using the context.
 func WithEventHandlersInTX(h ...eh.EventHandler) Option {
 	return func(s *EventStore) error {
-		if s.eventHandlerAfterSave != nil {
-			return fmt.Errorf("another event handler is already set")
-		}
-
 		if len(s.eventHandlersInTX) > 0 {
 			return fmt.Errorf("another TX event handler is already set")
 		}
