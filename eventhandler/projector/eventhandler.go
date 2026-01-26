@@ -101,7 +101,7 @@ func (e *Error) Cause() error {
 type EventHandler struct {
 	projector              Projector
 	repo                   eh.ReadWriteRepo
-	eventRepo              eh.EventStore
+	eventStore             eh.EventStore
 	factoryFn              func() eh.Entity
 	useWait                bool
 	useRetryOnce           bool
@@ -133,6 +133,13 @@ type Option func(*EventHandler)
 func WithWait() Option {
 	return func(h *EventHandler) {
 		h.useWait = true
+	}
+}
+
+// WithEventStore adds the event store to autofix broken entities.
+func WithEventStore(eventStore eh.EventStore) Option {
+	return func(h *EventHandler) {
+		h.eventStore = eventStore
 	}
 }
 
@@ -226,8 +233,17 @@ retryOnce:
 			goto retryOnce
 		}
 
+		if h.eventStore == nil {
+			return &Error{
+				Err:       fmt.Errorf("could not load entity with correct version: %w", err),
+				Projector: h.projector.ProjectorType().String(),
+				Event:     event,
+				EntityID:  id,
+			}
+		}
+
 		// try to fix a broken, versioned entity by projecting until event-1 and then projecting new event and saving
-		events, err := h.eventRepo.LoadUntil(ctx, id, event.Version()-1)
+		events, err := h.eventStore.LoadUntil(ctx, id, event.Version()-1)
 		if err != nil {
 			return &Error{
 				Err:       fmt.Errorf("could not load entity with correct version: %w", err),
@@ -250,13 +266,6 @@ retryOnce:
 			}
 		}
 
-		//
-		//return &Error{
-		//	Err:       fmt.Errorf("could not load entity with correct version: %w", err),
-		//	Projector: h.projector.ProjectorType().String(),
-		//	Event:     event,
-		//	EntityID:  id,
-		//}
 	} else if err != nil {
 		return &Error{
 			Err:       fmt.Errorf("could not load entity: %w", err),
