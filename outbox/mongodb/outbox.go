@@ -19,6 +19,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
 
 	eh "github.com/Clarilab/eventhorizon"
+	"github.com/Clarilab/eventhorizon/metrics"
 )
 
 var (
@@ -137,6 +138,10 @@ func (o *Outbox) AddHandler(_ context.Context, m eh.EventMatcher, h eh.EventHand
 
 	if h == nil {
 		return eh.ErrMissingHandler
+	}
+
+	if middleware := metrics.GetEventMiddleware(); middleware != nil {
+		h = middleware(h)
 	}
 
 	o.handlersMu.Lock()

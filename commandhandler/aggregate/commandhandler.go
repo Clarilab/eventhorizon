@@ -20,6 +20,7 @@ import (
 	"sync"
 
 	eh "github.com/Clarilab/eventhorizon"
+	"github.com/Clarilab/eventhorizon/metrics"
 )
 
 // ErrNilAggregateStore is when a dispatcher is created with a nil aggregate store.
@@ -75,6 +76,11 @@ func WithUseAtomic() Option {
 // HandleCommand handles a command with the registered aggregate.
 // Returns ErrAggregateNotFound if no aggregate could be found.
 func (h *CommandHandler) HandleCommand(ctx context.Context, cmd eh.Command) error {
+	var innerHandler eh.CommandHandler = eh.CommandHandlerFunc(h.handleCommand)
+	if middleware := metrics.GetCommandMiddleware(); middleware != nil {
+		innerHandler = middleware(innerHandler)
+	}
+
 	if h.useAtomic {
 		h.rwMutex.RLock()
 		_, ok := h.a[cmd.AggregateID().String()]
@@ -93,7 +99,7 @@ func (h *CommandHandler) HandleCommand(ctx context.Context, cmd eh.Command) erro
 		defer h.a[cmd.AggregateID().String()].Unlock()
 	}
 
-	return h.handleCommand(ctx, cmd)
+	return innerHandler.HandleCommand(ctx, cmd)
 }
 
 func (h *CommandHandler) handleCommand(ctx context.Context, cmd eh.Command) error {

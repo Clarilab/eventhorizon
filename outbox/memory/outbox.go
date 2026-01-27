@@ -13,6 +13,7 @@ import (
 	"github.com/jinzhu/copier"
 
 	eh "github.com/Clarilab/eventhorizon"
+	"github.com/Clarilab/eventhorizon/metrics"
 )
 
 var (
@@ -76,6 +77,10 @@ func (o *Outbox) AddHandler(ctx context.Context, m eh.EventMatcher, h eh.EventHa
 
 	if h == nil {
 		return eh.ErrMissingHandler
+	}
+
+	if middleware := metrics.GetEventMiddleware(); middleware != nil {
+		h = middleware(h)
 	}
 
 	o.handlersMu.Lock()
