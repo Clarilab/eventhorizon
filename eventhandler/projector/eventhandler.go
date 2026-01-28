@@ -101,7 +101,7 @@ func (e *Error) Cause() error {
 type EventHandler struct {
 	projector              Projector
 	repo                   eh.ReadWriteRepo
-	eventStore             eh.EventStore
+	eventStore             *eh.EventStore
 	factoryFn              func() eh.Entity
 	useWait                bool
 	useRetryOnce           bool
@@ -137,7 +137,7 @@ func WithWait() Option {
 }
 
 // WithEventStore adds the event store to autofix broken entities.
-func WithEventStore(eventStore eh.EventStore) Option {
+func WithEventStore(eventStore *eh.EventStore) Option {
 	return func(h *EventHandler) {
 		h.eventStore = eventStore
 	}
@@ -223,7 +223,20 @@ retryOnce:
 			}
 		}
 
-		entity = h.factoryFn()
+		// If it is the first event for this aggregate, just use the factory function, else projectOneBehind
+		if event.Version() <= 1 {
+			entity = h.factoryFn()
+		} else {
+			entity, err = h.projectOneBehindEntity(ctx, id, event, err)
+			if err != nil {
+				return &Error{
+					Err:       err,
+					Projector: h.projector.ProjectorType().String(),
+					Event:     event,
+					EntityID:  id,
+				}
+			}
+		}
 	} else if errors.Is(err, eh.ErrIncorrectEntityVersion) {
 		if h.useRetryOnce && !triedOnce {
 			triedOnce = true
@@ -233,39 +246,15 @@ retryOnce:
 			goto retryOnce
 		}
 
-		if h.eventStore == nil {
-			return &Error{
-				Err:       fmt.Errorf("could not load entity with correct version: %w", err),
-				Projector: h.projector.ProjectorType().String(),
-				Event:     event,
-				EntityID:  id,
-			}
-		}
-
-		// try to fix a broken, versioned entity by projecting until event-1 and then projecting new event and saving
-		events, err := h.eventStore.LoadUntil(ctx, id, event.Version()-1)
+		entity, err = h.projectOneBehindEntity(ctx, id, event, err)
 		if err != nil {
 			return &Error{
-				Err:       fmt.Errorf("could not load entity with correct version: %w", err),
+				Err:       err,
 				Projector: h.projector.ProjectorType().String(),
 				Event:     event,
 				EntityID:  id,
 			}
 		}
-
-		entity = h.factoryFn()
-		for _, event := range events {
-			entity, err = h.projector.Project(ctx, event, entity)
-			if err != nil {
-				return &Error{
-					Err:       fmt.Errorf("could not project: %w", err),
-					Projector: h.projector.ProjectorType().String(),
-					Event:     event,
-					EntityID:  id,
-				}
-			}
-		}
-
 	} else if err != nil {
 		return &Error{
 			Err:       fmt.Errorf("could not load entity: %w", err),
@@ -381,4 +370,27 @@ retryOnce:
 // SetEntityFactory sets a factory function that creates concrete entity types.
 func (h *EventHandler) SetEntityFactory(f func() eh.Entity) {
 	h.factoryFn = f
+}
+
+func (h *EventHandler) projectOneBehindEntity(ctx context.Context, id uuid.UUID, event eh.Event, causingErr error) (eh.Entity, error) {
+	if h.eventStore == nil {
+		return nil, fmt.Errorf("could not load entity with correct version: %w", causingErr)
+	}
+
+	// try to fix a broken, versioned entity by projecting until event-1 and then projecting new event and saving
+	eventStore := *h.eventStore
+	events, err := eventStore.LoadUntil(ctx, id, event.Version()-1)
+	if err != nil {
+		return nil, fmt.Errorf("could not repair entity: %w", err)
+	}
+
+	entity := h.factoryFn()
+	for _, event := range events {
+		entity, err = h.projector.Project(ctx, event, entity)
+		if err != nil {
+			return nil, fmt.Errorf("could not project repaired entity: %w", err)
+		}
+	}
+
+	return entity, nil
 }
