@@ -225,47 +225,29 @@ func TestEnableMetrics(t *testing.T) {
 	}
 }
 
-func BenchmarkMetrics(b *testing.B) {
-	defer cleanupMetrics()
-
-	if err := EnableMetrics("benchmark_service"); err != nil {
-		b.Fatalf("failed to enable metrics: %v", err)
-	}
-
-	cmdHandler := NewCommandHandlerMiddleware()(&TestCommandHandler{})
-	eventHandler := NewEventHandlerMiddleware()(&TestEventHandler{handlerType: "benchmark_handler"})
-
-	ctx := namespace.NewContext(context.Background(), "tenant_benchmark")
-	cmd := TestCommand{
-		ID:       uuid.Nil,
-		Name:     "benchmark_cmd",
-		Internal: "ignored",
-		Category: "benchmark",
-	}
-	eventData := TestEventData{
-		UserID:   "bench_user",
-		Secret:   "ignored",
-		Category: "benchmark",
-		Status:   "benchmarking",
-	}
-	event := eh.NewEvent("benchmark_event", eventData, time.Now(), eh.ForAggregate("benchmark_aggregate", uuid.Nil, 1))
-
-	b.ResetTimer()
-	for b.Loop() {
-		if err := cmdHandler.HandleCommand(ctx, cmd); err != nil {
-			b.Fatalf("command failed: %v", err)
-		}
-		if err := eventHandler.HandleEvent(ctx, event); err != nil {
-			b.Fatalf("event failed: %v", err)
-		}
+// noopCommandMiddleware returns a middleware that just passes through to the handler.
+// Used to measure the overhead of middleware wrapping itself.
+func noopCommandMiddleware() eh.CommandHandlerMiddleware {
+	return func(h eh.CommandHandler) eh.CommandHandler {
+		return eh.CommandHandlerFunc(func(ctx context.Context, cmd eh.Command) error {
+			return h.HandleCommand(ctx, cmd)
+		})
 	}
 }
 
-func BenchmarkNoMetrics(b *testing.B) {
-	defer cleanupMetrics()
+// noopEventMiddleware returns a middleware that just passes through to the handler.
+// Used to measure the overhead of middleware wrapping itself.
+func noopEventMiddleware() eh.EventHandlerMiddleware {
+	return func(h eh.EventHandler) eh.EventHandler {
+		return eh.EventHandlerFunc(func(ctx context.Context, event eh.Event) error {
+			return h.HandleEvent(ctx, event)
+		})
+	}
+}
 
-	cmdHandler := &TestCommandHandler{}
-	eventHandler := &TestEventHandler{handlerType: "benchmark_handler"}
+// BenchmarkBaseline measures the baseline performance without metrics.
+func BenchmarkBaseline(b *testing.B) {
+	defer cleanupMetrics()
 
 	ctx := namespace.NewContext(context.Background(), "tenant_benchmark")
 	cmd := TestCommand{
@@ -282,13 +264,111 @@ func BenchmarkNoMetrics(b *testing.B) {
 	}
 	event := eh.NewEvent("benchmark_event", eventData, time.Now(), eh.ForAggregate("benchmark_aggregate", uuid.Nil, 1))
 
-	b.ResetTimer()
-	for b.Loop() {
-		if err := cmdHandler.HandleCommand(ctx, cmd); err != nil {
-			b.Fatalf("command failed: %v", err)
+	b.Run("NoMiddleware", func(b *testing.B) {
+		cmdHandler := &TestCommandHandler{}
+		eventHandler := &TestEventHandler{handlerType: "benchmark_handler"}
+
+		b.ResetTimer()
+		for b.Loop() {
+			if err := cmdHandler.HandleCommand(ctx, cmd); err != nil {
+				b.Fatalf("command failed: %v", err)
+			}
+			if err := eventHandler.HandleEvent(ctx, event); err != nil {
+				b.Fatalf("event failed: %v", err)
+			}
 		}
-		if err := eventHandler.HandleEvent(ctx, event); err != nil {
-			b.Fatalf("event failed: %v", err)
+	})
+
+	b.Run("EmptyMiddleware", func(b *testing.B) {
+		cmdMiddleware := noopCommandMiddleware()
+		eventMiddleware := noopEventMiddleware()
+		cmdHandler := cmdMiddleware(&TestCommandHandler{})
+		eventHandler := eventMiddleware(&TestEventHandler{handlerType: "benchmark_handler"})
+
+		b.ResetTimer()
+		for b.Loop() {
+			if err := cmdHandler.HandleCommand(ctx, cmd); err != nil {
+				b.Fatalf("command failed: %v", err)
+			}
+			if err := eventHandler.HandleEvent(ctx, event); err != nil {
+				b.Fatalf("event failed: %v", err)
+			}
 		}
+	})
+}
+
+// BenchmarkMetrics measures metrics performance at different levels.
+func BenchmarkMetrics(b *testing.B) {
+	defer cleanupMetrics()
+
+	ctx := namespace.NewContext(context.Background(), "tenant_benchmark")
+	cmd := TestCommand{
+		ID:       uuid.Nil,
+		Name:     "benchmark_cmd",
+		Internal: "ignored",
+		Category: "benchmark",
 	}
+	eventData := TestEventData{
+		UserID:   "bench_user",
+		Secret:   "ignored",
+		Category: "benchmark",
+		Status:   "benchmarking",
+	}
+	event := eh.NewEvent("benchmark_event", eventData, time.Now(), eh.ForAggregate("benchmark_aggregate", uuid.Nil, 1))
+
+	b.Run("QueueOnly", func(b *testing.B) {
+		// Setup workload but DON'T start background goroutine
+		workload = "queue_only_benchmark"
+
+		b.ResetTimer()
+		for b.Loop() {
+			// Direct call to queue - this is the hot path
+			queue(ctx, "command", "test_command", cmd)
+		}
+	})
+
+	b.Run("MiddlewareOnly", func(b *testing.B) {
+		// Setup middleware but DON'T start background goroutine
+		workload = "middleware_only_benchmark"
+		SetCommandMiddleware(NewCommandHandlerMiddleware())
+		SetEventMiddleware(NewEventHandlerMiddleware())
+
+		baseCmdHandler := &TestCommandHandler{}
+		baseEventHandler := &TestEventHandler{handlerType: "benchmark_handler"}
+
+		// Wrap with metrics middleware
+		cmdHandler := GetCommandMiddleware()(baseCmdHandler)
+		eventHandler := GetEventMiddleware()(baseEventHandler)
+
+		b.ResetTimer()
+		for b.Loop() {
+			if err := cmdHandler.HandleCommand(ctx, cmd); err != nil {
+				b.Fatalf("command failed: %v", err)
+			}
+			if err := eventHandler.HandleEvent(ctx, event); err != nil {
+				b.Fatalf("event failed: %v", err)
+			}
+		}
+	})
+
+	b.Run("FullSystem", func(b *testing.B) {
+		cleanupMetrics()
+
+		if err := EnableMetrics("full_system_benchmark"); err != nil {
+			b.Fatalf("failed to enable metrics: %v", err)
+		}
+
+		cmdHandler := NewCommandHandlerMiddleware()(&TestCommandHandler{})
+		eventHandler := NewEventHandlerMiddleware()(&TestEventHandler{handlerType: "benchmark_handler"})
+
+		b.ResetTimer()
+		for b.Loop() {
+			if err := cmdHandler.HandleCommand(ctx, cmd); err != nil {
+				b.Fatalf("command failed: %v", err)
+			}
+			if err := eventHandler.HandleEvent(ctx, event); err != nil {
+				b.Fatalf("event failed: %v", err)
+			}
+		}
+	})
 }
