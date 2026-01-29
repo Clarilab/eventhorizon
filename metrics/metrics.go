@@ -4,11 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"reflect"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	vm "github.com/VictoriaMetrics/metrics"
@@ -16,88 +14,88 @@ import (
 	"github.com/Clarilab/eventhorizon/namespace"
 )
 
-type recorder interface {
-	RecordHandlerExecution(ctx context.Context, m metrics)
-}
-
-const MetricName = "kycnow_eventsourcing_total"
+const metricName = "kycnow_eventsourcing_total"
 
 var (
-	globalRecorderMu sync.RWMutex
-	globalRecorder   recorder
+	buffer   = make(chan metric, 10000)
+	workload string
 )
 
+type metric struct {
+	ctx          context.Context
+	handlerType  string
+	action       string
+	data         any
+	workloadName string
+}
+
+// EnableMetrics enables async metrics recording with the given workload name.
 func EnableMetrics(workloadName string) error {
 	if workloadName == "" {
 		return errors.New("workload name cannot be empty")
 	}
 
-	globalRecorderMu.Lock()
-	defer globalRecorderMu.Unlock()
+	workload = workloadName
 
-	globalRecorder = &victoriaMetricsRecorder{Workload: sanitize(workloadName)}
-	SetCommandMiddleware(NewCommandHandlerMiddleware(globalRecorder))
-	SetEventMiddleware(NewEventHandlerMiddleware(globalRecorder))
+	go func() {
+		for m := range buffer {
+			record(m)
+		}
+	}()
+
+	SetCommandMiddleware(NewCommandHandlerMiddleware())
+	SetEventMiddleware(NewEventHandlerMiddleware())
 
 	return nil
 }
 
-type metrics struct {
-	HandlerType string
-	Action      string
-	Labels      map[string]string
-	Error       error
+// queue sends a metric to the background processor.
+func queue(ctx context.Context, handlerType, action string, data any) {
+	select {
+	case buffer <- metric{
+		ctx:          ctx,
+		handlerType:  handlerType,
+		action:       action,
+		data:         data,
+		workloadName: workload,
+	}:
+	default:
+		// Buffer full, drop metric
+	}
 }
 
-type victoriaMetricsRecorder struct {
-	Workload string
-}
+// record extracts labels and increments the counter.
+func record(m metric) {
+	labelMap := extractLabels(m.data)
 
-func (r *victoriaMetricsRecorder) RecordHandlerExecution(ctx context.Context, m metrics) {
-	labelMap := map[string]string{}
-
-	for k, v := range m.Labels {
-		labelMap[sanitize(k)] = v
+	if m.handlerType != "" {
+		labelMap["handler_type"] = m.handlerType
+	}
+	if m.action != "" {
+		labelMap["action"] = m.action
+	}
+	if m.workloadName != "" {
+		labelMap["workload"] = m.workloadName
 	}
 
-	if m.HandlerType != "" {
-		labelMap["handler_type"] = m.HandlerType
-	}
-	if m.Action != "" {
-		labelMap["action"] = m.Action
-	}
-
-	if r.Workload != "" {
-		labelMap["workload"] = r.Workload
-	}
-
-	if tenant := namespace.FromContext(ctx); tenant != "" && tenant != namespace.DefaultNamespace {
+	if tenant := namespace.FromContext(m.ctx); tenant != "" && tenant != namespace.DefaultNamespace {
 		labelMap["tenant"] = tenant
 	}
 
 	var labels []string
-
 	for k, v := range labelMap {
-		if k == "" || v == "" {
-			continue
+		if k != "" && v != "" {
+			labels = append(labels, fmt.Sprintf("%s=%q", sanitizeLabelName(k), v))
 		}
-
-		labels = append(labels, fmt.Sprintf(`%s=%q`, k, v))
 	}
 
 	sort.Strings(labels)
 
-	metricName := fmt.Sprintf("%s{%s}", MetricName, strings.Join(labels, ","))
-
-	vm.GetOrCreateCounter(metricName).Inc()
+	fullName := fmt.Sprintf("%s{%s}", metricName, strings.Join(labels, ","))
+	vm.GetOrCreateCounter(fullName).Inc()
 }
 
-func InstallHandler(mux *http.ServeMux, path string) {
-	mux.HandleFunc(path, func(w http.ResponseWriter, _ *http.Request) {
-		vm.WritePrometheus(w, true)
-	})
-}
-
+// extractLabels reads struct fields with eh tags to create metric labels.
 func extractLabels(i any) map[string]string {
 	labels := make(map[string]string)
 	if i == nil {
@@ -157,14 +155,12 @@ func extractLabels(i any) map[string]string {
 	return labels
 }
 
-// sanitize sanitizes label names for Prometheus compatibility.
-// Prometheus metric names and label names must match the regex [a-zA-Z_][a-zA-Z0-9_]*.
-func sanitize(s string) string {
+// sanitizeLabelName ensures label names match Prometheus format: [a-zA-Z_][a-zA-Z0-9_]*
+func sanitizeLabelName(s string) string {
 	s = strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == ':' {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
 			return r
 		}
-
 		return '_'
 	}, s)
 

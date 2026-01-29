@@ -7,19 +7,12 @@ import (
 	eh "github.com/Clarilab/eventhorizon"
 )
 
-func NewCommandHandlerMiddleware(r recorder) eh.CommandHandlerMiddleware {
+func NewCommandHandlerMiddleware() eh.CommandHandlerMiddleware {
 	return func(h eh.CommandHandler) eh.CommandHandler {
 		return eh.CommandHandlerFunc(func(ctx context.Context, cmd eh.Command) error {
 			err := h.HandleCommand(ctx, cmd)
 
-			if r != nil {
-				r.RecordHandlerExecution(ctx, metrics{
-					HandlerType: "command",
-					Action:      string(cmd.CommandType()),
-					Labels:      extractLabels(cmd),
-					Error:       err,
-				})
-			}
+			queue(ctx, "command", string(cmd.CommandType()), cmd)
 
 			if err != nil {
 				return fmt.Errorf("could not handle command: %w", err)
@@ -30,39 +23,18 @@ func NewCommandHandlerMiddleware(r recorder) eh.CommandHandlerMiddleware {
 	}
 }
 
-func NewEventHandlerMiddleware(r recorder) eh.EventHandlerMiddleware {
+func NewEventHandlerMiddleware() eh.EventHandlerMiddleware {
 	return func(h eh.EventHandler) eh.EventHandler {
-		return &eventHandler{
-			EventHandler: h,
-			recorder:     r,
-		}
-	}
-}
+		return eh.EventHandlerFunc(func(ctx context.Context, event eh.Event) error {
+			err := h.HandleEvent(ctx, event)
 
-type eventHandler struct {
-	eh.EventHandler
-	recorder recorder
-}
+			queue(ctx, "event", string(event.EventType()), event.Data())
 
-func (h *eventHandler) InnerHandler() eh.EventHandler {
-	return h.EventHandler
-}
+			if err != nil {
+				return fmt.Errorf("could not handle event: %w", err)
+			}
 
-func (h *eventHandler) HandleEvent(ctx context.Context, event eh.Event) error {
-	err := h.EventHandler.HandleEvent(ctx, event)
-
-	if h.recorder != nil {
-		h.recorder.RecordHandlerExecution(ctx, metrics{
-			HandlerType: "event",
-			Action:      string(event.EventType()),
-			Labels:      extractLabels(event.Data()),
-			Error:       err,
+			return nil
 		})
 	}
-
-	if err != nil {
-		return fmt.Errorf("could not handle event: %w", err)
-	}
-
-	return nil
 }
