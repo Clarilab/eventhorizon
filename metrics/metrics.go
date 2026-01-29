@@ -20,6 +20,8 @@ type recorder interface {
 	RecordHandlerExecution(ctx context.Context, m metrics)
 }
 
+const MetricName = "kycnow_eventsourcing_total"
+
 var (
 	globalRecorderMu sync.RWMutex
 	globalRecorder   recorder
@@ -41,7 +43,6 @@ func EnableMetrics(workloadName string) error {
 }
 
 type metrics struct {
-	Name        string
 	HandlerType string
 	Action      string
 	Labels      map[string]string
@@ -53,8 +54,6 @@ type victoriaMetricsRecorder struct {
 }
 
 func (r *victoriaMetricsRecorder) RecordHandlerExecution(ctx context.Context, m metrics) {
-	name := "kycnow_eventsourcing_total"
-
 	labelMap := map[string]string{}
 
 	for k, v := range m.Labels {
@@ -88,7 +87,7 @@ func (r *victoriaMetricsRecorder) RecordHandlerExecution(ctx context.Context, m 
 
 	sort.Strings(labels)
 
-	metricName := fmt.Sprintf("%s{%s}", name, strings.Join(labels, ","))
+	metricName := fmt.Sprintf("%s{%s}", MetricName, strings.Join(labels, ","))
 
 	vm.GetOrCreateCounter(metricName).Inc()
 }

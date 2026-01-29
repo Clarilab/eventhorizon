@@ -53,7 +53,6 @@ func (h *eventHandler) HandleEvent(ctx context.Context, event eh.Event) error {
 
 	if h.recorder != nil {
 		h.recorder.RecordHandlerExecution(ctx, metrics{
-			Name:        string(h.HandlerType()),
 			HandlerType: "event",
 			Action:      string(event.EventType()),
 			Labels:      extractLabels(event.Data()),
