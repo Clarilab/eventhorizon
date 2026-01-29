@@ -74,7 +74,7 @@ func TestExtractLabels(t *testing.T) {
 			expected: map[string]string{
 				"aggregate_id": "00000000-0000-0000-0000-000000000000",
 				"cmd_name":     "create_user",
-				"Category":     "user_management",
+				"category":     "user_management",
 			},
 		},
 		{
@@ -88,7 +88,7 @@ func TestExtractLabels(t *testing.T) {
 			},
 			expected: map[string]string{
 				"user_id":      "user_123",
-				"Category":     "test_category",
+				"category":     "test_category",
 				"event_status": "completed",
 			},
 		},
@@ -146,6 +146,7 @@ func TestCommandMiddleware(t *testing.T) {
 		`handler_type="command"`,
 		`action="test_command"`,
 		`cmd_name="test_cmd"`,
+		`category="test"`,
 	}
 	for _, check := range checks {
 		if !strings.Contains(output, check) {
@@ -194,6 +195,7 @@ func TestEventMiddleware(t *testing.T) {
 		`handler_type="event"`,
 		`action="user_created"`,
 		`user_id="user_456"`,
+		`category="user_events"`,
 	}
 	for _, check := range checks {
 		if !strings.Contains(output, check) {

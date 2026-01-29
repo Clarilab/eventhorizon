@@ -149,10 +149,45 @@ func extractLabels(i any) map[string]string {
 			continue
 		}
 
-		labels[name] = value
+		labels[toSnakeCase(name)] = value
 	}
 
 	return labels
+}
+
+// toSnakeCase converts a string to snake_case.
+// Handles PascalCase, camelCase, and ALLCAPS.
+func toSnakeCase(s string) string {
+	if s == "" {
+		return s
+	}
+
+	var result []rune
+	runes := []rune(s)
+
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+
+		// If uppercase letter
+		if r >= 'A' && r <= 'Z' {
+			// Add underscore before uppercase if:
+			// 1. Not the first character
+			// 2. Previous character is lowercase, OR
+			// 3. Next character is lowercase (handles "UserID" -> "user_id")
+			if i > 0 {
+				prev := runes[i-1]
+				nextIsLower := i+1 < len(runes) && runes[i+1] >= 'a' && runes[i+1] <= 'z'
+				if (prev >= 'a' && prev <= 'z') || nextIsLower {
+					result = append(result, '_')
+				}
+			}
+			result = append(result, r-'A'+'a') // Convert to lowercase
+		} else {
+			result = append(result, r)
+		}
+	}
+
+	return string(result)
 }
 
 // sanitizeLabelName ensures label names match Prometheus format: [a-zA-Z_][a-zA-Z0-9_]*
