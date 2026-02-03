@@ -536,6 +536,34 @@ func TestEventHandler_EntityLookup(t *testing.T) {
 	}
 }
 
+func TestEventHandler_AutofixBrokenEntity(t *testing.T) {
+	repo := &mocks.Repo{}
+	projector := &TestProjector{}
+	eventStore := &TestEventStore{}
+
+	handler := NewEventHandler(projector, repo, WithEventStore(eventStore))
+	handler.SetEntityFactory(func() eh.Entity {
+		return &mocks.SimpleModel{}
+	})
+
+	aggregateID := uuid.New()
+
+	eventData := &mocks.EventData{Content: "event1"}
+	timestamp := time.Date(2009, time.November, 10, 23, 0, 0, 0, time.UTC)
+	event := eh.NewEvent(mocks.EventType, eventData, timestamp, eh.ForAggregate(mocks.AggregateType, aggregateID, 8))
+	repo.LoadErr = eh.ErrEntityNotFound
+
+	if err := handler.HandleEvent(context.Background(), event); err != nil {
+		t.Error("there should be no error:", err)
+	}
+
+	repo.LoadErr = eh.ErrIncorrectEntityVersion
+
+	if err := handler.HandleEvent(context.Background(), event); err != nil {
+		t.Error("there should be no error:", err)
+	}
+}
+
 const (
 	TestProjectorType Type = "TestProjector"
 )
@@ -562,4 +590,32 @@ func (m *TestProjector) Project(ctx context.Context, event eh.Event, entity eh.E
 	m.entity = entity
 
 	return m.newEntity, nil
+}
+
+type TestEventStore struct {
+	Events []eh.Event
+}
+
+func (t *TestEventStore) Save(ctx context.Context, events []eh.Event, originalVersion int) error {
+	return nil
+}
+
+// Load loads all events for the aggregate id from the store.
+func (t *TestEventStore) Load(context.Context, uuid.UUID) ([]eh.Event, error) {
+	return nil, nil
+}
+
+// LoadFrom loads all events from version for the aggregate id from the store.
+func (t *TestEventStore) LoadFrom(ctx context.Context, id uuid.UUID, version int) ([]eh.Event, error) {
+	return nil, nil
+}
+
+// LoadUntil loads all events until version for the aggregate id from the store.
+func (t *TestEventStore) LoadUntil(ctx context.Context, id uuid.UUID, version int) ([]eh.Event, error) {
+	return nil, nil
+}
+
+// Close closes the EventStore.
+func (t *TestEventStore) Close() error {
+	return nil
 }

@@ -101,7 +101,7 @@ func (e *Error) Cause() error {
 type EventHandler struct {
 	projector              Projector
 	repo                   eh.ReadWriteRepo
-	eventStore             *eh.EventStore
+	eventStore             eh.EventStore
 	factoryFn              func() eh.Entity
 	useWait                bool
 	useRetryOnce           bool
@@ -137,7 +137,7 @@ func WithWait() Option {
 }
 
 // WithEventStore adds the event store to autofix broken entities.
-func WithEventStore(eventStore *eh.EventStore) Option {
+func WithEventStore(eventStore eh.EventStore) Option {
 	return func(h *EventHandler) {
 		h.eventStore = eventStore
 	}
@@ -378,8 +378,7 @@ func (h *EventHandler) projectOneBehindEntity(ctx context.Context, id uuid.UUID,
 	}
 
 	// try to fix a broken, versioned entity by projecting until event-1 and then projecting new event and saving
-	eventStore := *h.eventStore
-	events, err := eventStore.LoadUntil(ctx, id, event.Version()-1)
+	events, err := h.eventStore.LoadUntil(ctx, id, event.Version()-1)
 	if err != nil {
 		return nil, fmt.Errorf("could not repair entity: %w", err)
 	}
