@@ -114,9 +114,7 @@ func TestExtractLabels(t *testing.T) {
 func TestCommandMiddleware(t *testing.T) {
 	defer cleanupMetrics()
 
-	if err := EnableMetrics("test_service"); err != nil {
-		t.Fatalf("failed to enable metrics: %v", err)
-	}
+	EnableMetrics()
 
 	middleware := NewCommandHandlerMiddleware()
 	wrappedHandler := middleware(&TestCommandHandler{})
@@ -141,7 +139,6 @@ func TestCommandMiddleware(t *testing.T) {
 
 	checks := []string{
 		`kycnow_eventsourcing_total{`,
-		`workload="test_service"`,
 		`tenant="tenant_123"`,
 		`handler_type="command"`,
 		`action="test_command"`,
@@ -162,9 +159,7 @@ func TestCommandMiddleware(t *testing.T) {
 func TestEventMiddleware(t *testing.T) {
 	defer cleanupMetrics()
 
-	if err := EnableMetrics("test_service"); err != nil {
-		t.Fatalf("failed to enable metrics: %v", err)
-	}
+	EnableMetrics()
 
 	middleware := NewEventHandlerMiddleware()
 	wrappedHandler := middleware(&TestEventHandler{handlerType: "test_projector"})
@@ -190,7 +185,6 @@ func TestEventMiddleware(t *testing.T) {
 
 	checks := []string{
 		`kycnow_eventsourcing_total{`,
-		`workload="test_service"`,
 		`tenant="tenant_456"`,
 		`handler_type="event"`,
 		`action="user_created"`,
@@ -211,13 +205,7 @@ func TestEventMiddleware(t *testing.T) {
 func TestEnableMetrics(t *testing.T) {
 	defer cleanupMetrics()
 
-	if err := EnableMetrics(""); err == nil {
-		t.Error("expected error for empty workload")
-	}
-
-	if err := EnableMetrics("my_service"); err != nil {
-		t.Fatalf("failed to enable metrics: %v", err)
-	}
+	EnableMetrics()
 
 	if GetCommandMiddleware() == nil {
 		t.Error("command middleware should be registered")
@@ -319,8 +307,7 @@ func BenchmarkMetrics(b *testing.B) {
 	event := eh.NewEvent("benchmark_event", eventData, time.Now(), eh.ForAggregate("benchmark_aggregate", uuid.Nil, 1))
 
 	b.Run("QueueOnly", func(b *testing.B) {
-		// Setup workload but DON'T start background goroutine
-		workload = "queue_only_benchmark"
+		// Setup but DON'T start background goroutine
 
 		b.ResetTimer()
 		for b.Loop() {
@@ -331,7 +318,6 @@ func BenchmarkMetrics(b *testing.B) {
 
 	b.Run("MiddlewareOnly", func(b *testing.B) {
 		// Setup middleware but DON'T start background goroutine
-		workload = "middleware_only_benchmark"
 		SetCommandMiddleware(NewCommandHandlerMiddleware())
 		SetEventMiddleware(NewEventHandlerMiddleware())
 
@@ -356,9 +342,7 @@ func BenchmarkMetrics(b *testing.B) {
 	b.Run("FullSystem", func(b *testing.B) {
 		cleanupMetrics()
 
-		if err := EnableMetrics("full_system_benchmark"); err != nil {
-			b.Fatalf("failed to enable metrics: %v", err)
-		}
+		EnableMetrics()
 
 		cmdHandler := NewCommandHandlerMiddleware()(&TestCommandHandler{})
 		eventHandler := NewEventHandlerMiddleware()(&TestEventHandler{handlerType: "benchmark_handler"})

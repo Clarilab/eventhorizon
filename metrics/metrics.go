@@ -2,7 +2,6 @@ package metrics
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -17,26 +16,18 @@ import (
 const metricName = "kycnow_eventsourcing_total"
 
 var (
-	buffer   = make(chan metric, 10000)
-	workload string
+	buffer = make(chan metric, 10000)
 )
 
 type metric struct {
-	ctx          context.Context
-	handlerType  string
-	action       string
-	data         any
-	workloadName string
+	ctx         context.Context
+	handlerType string
+	action      string
+	data        any
 }
 
-// EnableMetrics enables async metrics recording with the given workload name.
-func EnableMetrics(workloadName string) error {
-	if workloadName == "" {
-		return errors.New("workload name cannot be empty")
-	}
-
-	workload = workloadName
-
+// EnableMetrics enables async metrics recording.
+func EnableMetrics() {
 	go func() {
 		for m := range buffer {
 			record(m)
@@ -45,19 +36,16 @@ func EnableMetrics(workloadName string) error {
 
 	SetCommandMiddleware(NewCommandHandlerMiddleware())
 	SetEventMiddleware(NewEventHandlerMiddleware())
-
-	return nil
 }
 
 // queue sends a metric to the background processor.
 func queue(ctx context.Context, handlerType, action string, data any) {
 	select {
 	case buffer <- metric{
-		ctx:          ctx,
-		handlerType:  handlerType,
-		action:       action,
-		data:         data,
-		workloadName: workload,
+		ctx:         ctx,
+		handlerType: handlerType,
+		action:      action,
+		data:        data,
 	}:
 	default:
 		// Buffer full, drop metric
@@ -73,9 +61,6 @@ func record(m metric) {
 	}
 	if m.action != "" {
 		labelMap["action"] = m.action
-	}
-	if m.workloadName != "" {
-		labelMap["workload"] = m.workloadName
 	}
 
 	if tenant := namespace.FromContext(m.ctx); tenant != "" && tenant != namespace.DefaultNamespace {
