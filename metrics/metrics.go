@@ -16,7 +16,7 @@ import (
 const metricName = "kycnow_eventsourcing_total"
 
 var (
-	buffer = make(chan metric, 10000)
+	buffer chan metric
 )
 
 type metric struct {
@@ -28,6 +28,8 @@ type metric struct {
 
 // EnableMetrics enables async metrics recording.
 func EnableMetrics() {
+	buffer = make(chan metric, 10000)
+
 	go func() {
 		for m := range buffer {
 			record(m)
