@@ -168,7 +168,7 @@ func toSnakeCase(s string) string {
 	var result []rune
 	runes := []rune(s)
 
-	for i := 0; i < len(runes); i++ {
+	for i := range runes {
 		r := runes[i]
 
 		// If uppercase letter
