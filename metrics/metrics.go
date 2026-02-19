@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,9 +23,10 @@ var (
 )
 
 type metric struct {
-	tenant      string
-	handlerType string
 	action      string
+	handlerType string
+	tenant      string
+	successful  bool
 	data        any
 }
 
@@ -52,7 +54,7 @@ func CloseMetrics() {
 }
 
 // queue sends a metric to the background processor.
-func queue(ctx context.Context, handlerType, action string, data any) {
+func queue(ctx context.Context, handlerType, action string, successful bool, data any) {
 	tenant := namespace.FromContext(ctx)
 	if tenant == namespace.DefaultNamespace {
 		tenant = ""
@@ -64,6 +66,7 @@ func queue(ctx context.Context, handlerType, action string, data any) {
 		handlerType: handlerType,
 		action:      action,
 		data:        data,
+		successful:  successful,
 	}:
 	default:
 		// Buffer full, drop metric
@@ -74,16 +77,19 @@ func queue(ctx context.Context, handlerType, action string, data any) {
 func record(m metric) {
 	labelMap := extractLabels(m.data)
 
-	if m.handlerType != "" {
-		labelMap["handler_type"] = m.handlerType
-	}
 	if m.action != "" {
 		labelMap["action"] = m.action
+	}
+
+	if m.handlerType != "" {
+		labelMap["handler_type"] = m.handlerType
 	}
 
 	if m.tenant != "" {
 		labelMap["tenant"] = m.tenant
 	}
+
+	labelMap["successful"] = strconv.FormatBool(m.successful)
 
 	var labels []string
 	for k, v := range labelMap {
