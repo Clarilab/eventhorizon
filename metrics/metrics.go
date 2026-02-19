@@ -20,7 +20,7 @@ var (
 )
 
 type metric struct {
-	ctx         context.Context
+	tenant      string
 	handlerType string
 	action      string
 	data        any
@@ -40,9 +40,14 @@ func EnableMetrics() {
 
 // queue sends a metric to the background processor.
 func queue(ctx context.Context, handlerType, action string, data any) {
+	tenant := namespace.FromContext(ctx)
+	if tenant == namespace.DefaultNamespace {
+		tenant = ""
+	}
+
 	select {
 	case buffer <- metric{
-		ctx:         ctx,
+		tenant:      tenant,
 		handlerType: handlerType,
 		action:      action,
 		data:        data,
@@ -63,8 +68,8 @@ func record(m metric) {
 		labelMap["action"] = m.action
 	}
 
-	if tenant := namespace.FromContext(m.ctx); tenant != "" && tenant != namespace.DefaultNamespace {
-		labelMap["tenant"] = tenant
+	if m.tenant != "" {
+		labelMap["tenant"] = m.tenant
 	}
 
 	var labels []string
