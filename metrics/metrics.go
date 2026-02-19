@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	vm "github.com/VictoriaMetrics/metrics"
@@ -17,6 +18,7 @@ const metricName = "kycnow_eventsourcing_total"
 
 var (
 	buffer chan metric
+	wg     *sync.WaitGroup
 )
 
 type metric struct {
@@ -34,10 +36,19 @@ func EnableMetrics() {
 		for m := range buffer {
 			record(m)
 		}
+
+		wg.Done()
 	}()
 
 	SetCommandMiddleware(NewCommandHandlerMiddleware())
 	SetEventMiddleware(NewEventHandlerMiddleware())
+}
+
+// CloseMetrics closes all resources used by the metrics system.
+func CloseMetrics() {
+	if buffer != nil {
+		wg.Go(func() { close(buffer) })
+	}
 }
 
 // queue sends a metric to the background processor.
