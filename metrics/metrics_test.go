@@ -312,7 +312,7 @@ func BenchmarkMetrics(b *testing.B) {
 		b.ResetTimer()
 		for b.Loop() {
 			// Direct call to queue - this is the hot path
-			queue(ctx, "command", "test_command", cmd)
+			queue(ctx, "command", "test_command", true, cmd)
 		}
 	})
 

@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	vm "github.com/VictoriaMetrics/metrics"
@@ -16,36 +18,55 @@ import (
 const metricName = "kycnow_eventsourcing_total"
 
 var (
-	buffer = make(chan metric, 10000)
+	buffer chan metric
+	wg     *sync.WaitGroup
 )
 
 type metric struct {
-	ctx         context.Context
-	handlerType string
 	action      string
+	handlerType string
+	tenant      string
+	successful  bool
 	data        any
 }
 
 // EnableMetrics enables async metrics recording.
 func EnableMetrics() {
+	buffer = make(chan metric, 10000)
+
 	go func() {
 		for m := range buffer {
 			record(m)
 		}
+
+		wg.Done()
 	}()
 
 	SetCommandMiddleware(NewCommandHandlerMiddleware())
 	SetEventMiddleware(NewEventHandlerMiddleware())
 }
 
+// CloseMetrics closes all resources used by the metrics system.
+func CloseMetrics() {
+	if buffer != nil {
+		wg.Go(func() { close(buffer) })
+	}
+}
+
 // queue sends a metric to the background processor.
-func queue(ctx context.Context, handlerType, action string, data any) {
+func queue(ctx context.Context, handlerType, action string, successful bool, data any) {
+	tenant := namespace.FromContext(ctx)
+	if tenant == namespace.DefaultNamespace {
+		tenant = ""
+	}
+
 	select {
 	case buffer <- metric{
-		ctx:         ctx,
+		tenant:      tenant,
 		handlerType: handlerType,
 		action:      action,
 		data:        data,
+		successful:  successful,
 	}:
 	default:
 		// Buffer full, drop metric
@@ -56,16 +77,19 @@ func queue(ctx context.Context, handlerType, action string, data any) {
 func record(m metric) {
 	labelMap := extractLabels(m.data)
 
-	if m.handlerType != "" {
-		labelMap["handler_type"] = m.handlerType
-	}
 	if m.action != "" {
 		labelMap["action"] = m.action
 	}
 
-	if tenant := namespace.FromContext(m.ctx); tenant != "" && tenant != namespace.DefaultNamespace {
-		labelMap["tenant"] = tenant
+	if m.handlerType != "" {
+		labelMap["handler_type"] = m.handlerType
 	}
+
+	if m.tenant != "" {
+		labelMap["tenant"] = m.tenant
+	}
+
+	labelMap["successful"] = strconv.FormatBool(m.successful)
 
 	var labels []string
 	for k, v := range labelMap {
@@ -150,7 +174,7 @@ func toSnakeCase(s string) string {
 	var result []rune
 	runes := []rune(s)
 
-	for i := 0; i < len(runes); i++ {
+	for i := range runes {
 		r := runes[i]
 
 		// If uppercase letter

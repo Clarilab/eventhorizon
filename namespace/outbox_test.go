@@ -1,4 +1,4 @@
-package namespace
+package namespace_test
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 
 	eh "github.com/Clarilab/eventhorizon"
 	"github.com/Clarilab/eventhorizon/mocks"
+	"github.com/Clarilab/eventhorizon/namespace"
 	"github.com/Clarilab/eventhorizon/outbox"
 	"github.com/Clarilab/eventhorizon/outbox/memory"
 )
@@ -28,7 +29,7 @@ func TestOutbox(t *testing.T) {
 
 	outboxCreated.Add(2)
 
-	o := NewOutbox(func(ns string) (eh.Outbox, error) {
+	o := namespace.NewOutbox(func(ns string) (eh.Outbox, error) {
 		usedNamespaces[ns] = struct{}{}
 		o, err := memory.NewOutbox()
 		if err != nil {
@@ -50,7 +51,7 @@ func TestOutbox(t *testing.T) {
 		t.Fatal("there should be no error:", err)
 	}
 
-	if err := o.PreRegisterNamespace(DefaultNamespace); err != nil {
+	if err := o.PreRegisterNamespace(namespace.DefaultNamespace); err != nil {
 		t.Error("there should be no error:", err)
 	}
 
@@ -62,7 +63,7 @@ func TestOutbox(t *testing.T) {
 	// Check that both outboxes have been created.
 	outboxCreated.Wait()
 
-	if _, ok := usedNamespaces[DefaultNamespace]; !ok {
+	if _, ok := usedNamespaces[namespace.DefaultNamespace]; !ok {
 		t.Error("the default namespace should have been used")
 	}
 
@@ -71,9 +72,9 @@ func TestOutbox(t *testing.T) {
 	}
 
 	t.Log("testing default namespace")
-	outbox.AcceptanceTest(t, o, context.Background(), DefaultNamespace)
+	outbox.AcceptanceTest(t, o, context.Background(), namespace.DefaultNamespace)
 
-	ctx := NewContext(context.Background(), ns)
+	ctx := namespace.NewContext(context.Background(), ns)
 
 	t.Log("testing other namespace")
 	outbox.AcceptanceTest(t, o, ctx, ns)
