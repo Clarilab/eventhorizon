@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	eh "github.com/Clarilab/eventhorizon"
+	"github.com/Clarilab/eventhorizon/backoff"
 	"github.com/Clarilab/eventhorizon/mocks"
 	"github.com/Clarilab/eventhorizon/uuid"
 )
@@ -79,15 +80,35 @@ func TestCommandHandler(t *testing.T) {
 	}
 
 	t.Run("non-atomic", func(t *testing.T) {
-		aggregate, handler, _ = createAggregateAndHandler(t, false)
+		aggregate, handler, _ = createAggregateAndHandler(t)
 
 		test()
 	})
 
 	t.Run("atomic", func(t *testing.T) {
-		aggregate, handler, _ = createAggregateAndHandler(t, true)
+		aggregate, handler, _ = createAggregateAndHandler(t, WithUseAtomic())
 
 		test()
+	})
+
+	t.Run("with backoff", func(t *testing.T) {
+		aggregate, handler, _ = createAggregateAndHandler(t, WithBackOff(backoff.NewDefaultBackOff(3)))
+		mockErr := errors.New("mock error")
+
+		aggregate.Err = mockErr
+
+		ctx := context.WithValue(context.Background(), "testkey", "testval")
+
+		cmd := &mocks.Command{
+			ID:      aggregate.EntityID(),
+			Content: "command1",
+		}
+
+		err := handler.HandleCommand(ctx, cmd)
+
+		if !errors.Is(err, mockErr) {
+			t.Error("there should be an error")
+		}
 	})
 }
 
@@ -118,7 +139,7 @@ func TestCommandHandler_AggregateNotFound(t *testing.T) {
 }
 
 func TestCommandHandler_ErrorInHandler(t *testing.T) {
-	a, h, _ := createAggregateAndHandler(t, false)
+	a, h, _ := createAggregateAndHandler(t)
 
 	commandErr := errors.New("command error")
 	a.Err = commandErr
@@ -139,7 +160,7 @@ func TestCommandHandler_ErrorInHandler(t *testing.T) {
 }
 
 func TestCommandHandler_ErrorWhenSaving(t *testing.T) {
-	a, h, store := createAggregateAndHandler(t, false)
+	a, h, store := createAggregateAndHandler(t)
 
 	saveErr := errors.New("save error")
 	store.Err = saveErr
@@ -155,7 +176,7 @@ func TestCommandHandler_ErrorWhenSaving(t *testing.T) {
 }
 
 func TestCommandHandler_NoHandlers(t *testing.T) {
-	_, h, _ := createAggregateAndHandler(t, false)
+	_, h, _ := createAggregateAndHandler(t)
 
 	cmd := &mocks.Command{
 		ID:      uuid.New(),
@@ -226,7 +247,7 @@ func BenchmarkCommandHandlerAtomic(b *testing.B) {
 	}
 }
 
-func createAggregateAndHandler(t *testing.T, useAtomic bool) (*mocks.Aggregate, *CommandHandler, *mocks.AggregateStore) {
+func createAggregateAndHandler(t *testing.T, opts ...Option) (*mocks.Aggregate, *CommandHandler, *mocks.AggregateStore) {
 	a := mocks.NewAggregate(uuid.New())
 	store := &mocks.AggregateStore{
 		Aggregates: map[uuid.UUID]eh.Aggregate{
@@ -235,16 +256,7 @@ func createAggregateAndHandler(t *testing.T, useAtomic bool) (*mocks.Aggregate, 
 		Snapshots: make(map[uuid.UUID]eh.Snapshot),
 	}
 
-	if useAtomic {
-		h, err := NewCommandHandler(mocks.AggregateType, store, WithUseAtomic())
-		if err != nil {
-			t.Fatal("there should be no error:", err)
-		}
-
-		return a, h, store
-	}
-
-	h, err := NewCommandHandler(mocks.AggregateType, store)
+	h, err := NewCommandHandler(mocks.AggregateType, store, opts...)
 	if err != nil {
 		t.Fatal("there should be no error:", err)
 	}

@@ -39,6 +39,7 @@ type CommandHandler struct {
 	t         eh.AggregateType
 	store     eh.AggregateStore
 	useAtomic bool
+	backoff   eh.BackOff
 	rwMutex   *sync.RWMutex
 	a         map[string]*sync.Mutex
 }
@@ -73,10 +74,26 @@ func WithUseAtomic() Option {
 	}
 }
 
+// WithBackOff sets a backoff strategy for handling commands.
+func WithBackOff(backoff eh.BackOff) Option {
+	return func(h *CommandHandler) {
+		if backoff != nil {
+			h.backoff = backoff
+		}
+	}
+}
+
 // HandleCommand handles a command with the registered aggregate.
 // Returns ErrAggregateNotFound if no aggregate could be found.
 func (h *CommandHandler) HandleCommand(ctx context.Context, cmd eh.Command) error {
 	var innerHandler eh.CommandHandler = eh.CommandHandlerFunc(h.handleCommand)
+
+	if h.backoff != nil {
+		innerHandler = eh.CommandHandlerFunc(func(ctx context.Context, c eh.Command) error {
+			return h.backoff.Do(func() error { return h.handleCommand(ctx, c) })
+		})
+	}
+
 	if middleware := metrics.GetCommandMiddleware(); middleware != nil {
 		innerHandler = middleware(innerHandler)
 	}
