@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -54,6 +55,7 @@ func cleanupMetrics() {
 	vm.UnregisterAllMetrics()
 	metricsCommandHandlerMiddleware = nil
 	metricsEventHandlerMiddleware = nil
+	enableOnce = sync.Once{}
 }
 
 func TestExtractLabels(t *testing.T) {
@@ -318,8 +320,8 @@ func BenchmarkMetrics(b *testing.B) {
 
 	b.Run("MiddlewareOnly", func(b *testing.B) {
 		// Setup middleware but DON'T start background goroutine
-		SetCommandMiddleware(NewCommandHandlerMiddleware())
-		SetEventMiddleware(NewEventHandlerMiddleware())
+		setCommandMiddleware(NewCommandHandlerMiddleware())
+		setEventMiddleware(NewEventHandlerMiddleware())
 
 		baseCmdHandler := &TestCommandHandler{}
 		baseEventHandler := &TestEventHandler{handlerType: "benchmark_handler"}

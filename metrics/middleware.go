@@ -9,8 +9,8 @@ var (
 	metricsEventHandlerMiddleware   eh.EventHandlerMiddleware
 )
 
-// SetCommandMiddleware sets the metrics command handler middleware.
-func SetCommandMiddleware(m eh.CommandHandlerMiddleware) {
+// setCommandMiddleware sets the metrics command handler middleware.
+func setCommandMiddleware(m eh.CommandHandlerMiddleware) {
 	metricsCommandHandlerMiddleware = m
 }
 
@@ -19,8 +19,8 @@ func GetCommandMiddleware() eh.CommandHandlerMiddleware {
 	return metricsCommandHandlerMiddleware
 }
 
-// SetEventMiddleware sets the metrics event handler middleware.
-func SetEventMiddleware(m eh.EventHandlerMiddleware) {
+// setEventMiddleware sets the metrics event handler middleware.
+func setEventMiddleware(m eh.EventHandlerMiddleware) {
 	metricsEventHandlerMiddleware = m
 }
 
