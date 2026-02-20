@@ -7,6 +7,8 @@ import (
 	eh "github.com/Clarilab/eventhorizon"
 )
 
+// NewCommandHandlerMiddleware creates a new middleware that records metrics for command handlers.
+// It tracks command execution results including success/failure status and queue metrics.
 func NewCommandHandlerMiddleware() eh.CommandHandlerMiddleware {
 	return func(h eh.CommandHandler) eh.CommandHandler {
 		return eh.CommandHandlerFunc(func(ctx context.Context, cmd eh.Command) error {
@@ -24,6 +26,8 @@ func NewCommandHandlerMiddleware() eh.CommandHandlerMiddleware {
 	}
 }
 
+// NewEventHandlerMiddleware creates a new middleware that records metrics for event handlers.
+// It tracks event handling results including success/failure status and queue metrics.
 func NewEventHandlerMiddleware() eh.EventHandlerMiddleware {
 	return func(h eh.EventHandler) eh.EventHandler {
 		return eh.EventHandlerFunc(func(ctx context.Context, event eh.Event) error {
