@@ -18,8 +18,9 @@ import (
 const metricName = "kycnow_eventsourcing_total"
 
 var (
-	buffer chan metric
-	wg     *sync.WaitGroup
+	buffer     chan metric
+	wg         *sync.WaitGroup
+	enableOnce sync.Once
 )
 
 type metric struct {
@@ -31,19 +32,22 @@ type metric struct {
 }
 
 // EnableMetrics enables async metrics recording.
+// This function is safe to call multiple times - subsequent calls are no-ops.
 func EnableMetrics() {
-	buffer = make(chan metric, 10000)
+	enableOnce.Do(func() {
+		buffer = make(chan metric, 10000)
+		wg = &sync.WaitGroup{}
 
-	go func() {
-		for m := range buffer {
-			record(m)
-		}
+		wg.Go(func() {
+			for m := range buffer {
+				record(m)
+			}
 
-		wg.Done()
-	}()
+		})
 
-	SetCommandMiddleware(NewCommandHandlerMiddleware())
-	SetEventMiddleware(NewEventHandlerMiddleware())
+		setCommandMiddleware(NewCommandHandlerMiddleware())
+		setEventMiddleware(NewEventHandlerMiddleware())
+	})
 }
 
 // CloseMetrics closes all resources used by the metrics system.
