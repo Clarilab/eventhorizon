@@ -15,9 +15,9 @@ import (
 )
 
 type TestCommand struct {
-	ID       uuid.UUID `eh:"label:aggregate_id"`
-	Name     string    `eh:"label:cmd_name"`
-	Internal string    `eh:"nolabel"`
+	ID       uuid.UUID `metrics:"label:aggregate_id"`
+	Name     string    `metrics:"label:cmd_name"`
+	Internal string    `metrics:"exclude"`
 	Category string
 	private  string
 }
@@ -29,11 +29,66 @@ func (c TestCommand) AggregateType() eh.AggregateType { return "test_aggregate" 
 func (c TestCommand) CommandType() eh.CommandType     { return "test_command" }
 
 type TestEventData struct {
-	UserID   string `eh:"label:user_id"`
-	Secret   string `eh:"nolabel"`
+	UserID   string `metrics:"label:user_id"`
+	Secret   string `metrics:"exclude"`
 	Category string
-	Status   string `eh:"label:event_status"`
+	Status   string `metrics:"label:event_status"`
 	internal int
+}
+
+// NestedStruct tests one-level nested struct flattening.
+type NestedInner struct {
+	InnerValue string `metrics:"label:inner_val"`
+	Secret     string `metrics:"exclude"` // should be excluded
+	private    string // private, ignored
+}
+
+type NestedOuter struct {
+	OuterValue string
+	Inner      NestedInner `bson:",inline"` // bson inline tag to flatten
+}
+
+// CollisionStruct tests that duplicate field names are ignored.
+type CollisionInner struct {
+	Name  string // collides with Outer.Name
+	Extra string
+}
+
+type CollisionOuter struct {
+	Name  string
+	Inner CollisionInner `bson:",inline"` // bson inline tag to flatten
+}
+
+// TimeStruct tests that time.Time fields are excluded.
+type TimeInner struct {
+	Module string
+}
+
+type TimeOuter struct {
+	Name      string
+	Timestamp time.Time
+	Inner     TimeInner `metrics:"include"`
+}
+
+// DoubleFlattenStruct tests flattening two structs.
+type FirstInner struct {
+	FirstValue string
+}
+
+type SecondInner struct {
+	SecondValue string
+}
+
+type DoubleFlattenOuter struct {
+	Name   string
+	First  FirstInner  `metrics:"include"`
+	Second SecondInner `metrics:"include"`
+}
+
+// IncludeOnNonStruct tests that metrics:include on non-struct fields doesn't break.
+type IncludeOnNonStruct struct {
+	Value    string `metrics:"include"` // include on string - should work normally
+	Category string
 }
 
 type TestEventHandler struct {
@@ -96,6 +151,74 @@ func TestExtractLabels(t *testing.T) {
 		},
 		{name: "nil input", input: nil, expected: map[string]string{}},
 		{name: "empty struct", input: struct{}{}, expected: map[string]string{}},
+		{
+			name: "nested struct one level",
+			input: NestedOuter{
+				OuterValue: "outer_val",
+				Inner: NestedInner{
+					InnerValue: "inner_val",
+					Secret:     "should_be_excluded",
+					private:    "private_ignored",
+				},
+			},
+			expected: map[string]string{
+				"outer_value": "outer_val",
+				"inner_val":   "inner_val",
+			},
+		},
+		{
+			name: "collision nested wins",
+			input: CollisionOuter{
+				Name: "outer_name",
+				Inner: CollisionInner{
+					Name:  "inner_name", // duplicate, wins over outer
+					Extra: "extra_val",
+				},
+			},
+			expected: map[string]string{
+				"name":  "inner_name", // nested wins (last write)
+				"extra": "extra_val",
+			},
+		},
+		{
+			name: "time fields excluded",
+			input: TimeOuter{
+				Name:      "test_name",
+				Timestamp: time.Date(2026, 2, 25, 13, 10, 16, 0, time.UTC),
+				Inner: TimeInner{
+					Module: "test_module",
+				},
+			},
+			expected: map[string]string{
+				"name":   "test_name",
+				"module": "test_module",
+				// timestamp should NOT be included
+			},
+		},
+		{
+			name: "flatten two structs",
+			input: DoubleFlattenOuter{
+				Name:   "outer_name",
+				First:  FirstInner{FirstValue: "first_val"},
+				Second: SecondInner{SecondValue: "second_val"},
+			},
+			expected: map[string]string{
+				"name":         "outer_name",
+				"first_value":  "first_val",
+				"second_value": "second_val",
+			},
+		},
+		{
+			name: "include on non-struct field works normally",
+			input: IncludeOnNonStruct{
+				Value:    "test_value",
+				Category: "test_category",
+			},
+			expected: map[string]string{
+				"value":    "test_value",
+				"category": "test_category",
+			},
+		},
 	}
 
 	for _, tt := range tests {

@@ -31,8 +31,37 @@ type metric struct {
 	data        any
 }
 
-// EnableMetrics enables async metrics recording.
+// EnableMetrics enables async metrics recording for commands and events.
+//
 // This function is safe to call multiple times - subsequent calls are no-ops.
+//
+// Metric Labels:
+// Struct fields are automatically converted to metric labels using the following rules:
+//   - Field names are converted to snake_case (e.g., "OrderID" -> "order_id")
+//   - Only exported fields (starting with uppercase) are included
+//   - Maps, slices, and time.Time fields are excluded
+//
+// Struct Tags:
+//   - metrics:"label:custom_name" - Use a custom label name instead of field name
+//   - metrics:"exclude" - Skip this field entirely
+//   - metrics:"include" - Flatten this nested struct's fields into labels
+//
+// Nested Structs:
+// By default, only the top-level struct fields become labels. Nested structs are
+// included only when they have one of these tags:
+//   - json:",inline" tag
+//   - bson:",inline" tag
+//   - metrics:"include" tag
+//
+// Example:
+//
+//	type Command struct {
+//	    Base     BaseStruct `metrics:"include"`
+//	    ID       string `metrics:"label:aggregate_id"`
+//	    UserID   string `metrics:"exclude"`
+//	}
+//
+// This extracts all exported fields from BaseStruct and aggregate_id (from ID).
 func EnableMetrics() {
 	enableOnce.Do(func() {
 		buffer = make(chan metric, 10000)
@@ -108,61 +137,62 @@ func record(m metric) {
 	vm.GetOrCreateCounter(fullName).Inc()
 }
 
-// extractLabels reads struct fields with eh tags to create metric labels.
-func extractLabels(i any) map[string]string {
+// extractLabels reads struct fields with metrics tags to create metric labels.
+// Nested structs are flattened one level deep only when they have json/bson inline tags
+// or metrics:include tag. Later values overwrite earlier ones.
+func extractLabels(data any) map[string]string {
 	labels := make(map[string]string)
-	if i == nil {
+	if data == nil {
 		return labels
 	}
 
-	v := reflect.Indirect(reflect.ValueOf(i))
-	if v.Kind() != reflect.Struct {
+	value := reflect.Indirect(reflect.ValueOf(data))
+	if value.Kind() != reflect.Struct {
 		return labels
 	}
 
-	t := v.Type()
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-
-		if len(field.Name) == 0 || field.Name[0] < 'A' || field.Name[0] > 'Z' {
-			continue
+	// Get label name from field
+	getName := func(structField reflect.StructField) string {
+		if label, ok := strings.CutPrefix(structField.Tag.Get("metrics"), "label:"); ok {
+			return toSnakeCase(label)
 		}
+		return toSnakeCase(structField.Name)
+	}
 
-		tag := field.Tag.Get("eh")
-
-		if tag == "nolabel" {
-			continue
-		}
-
-		fieldValue := v.Field(i)
-		fieldKind := fieldValue.Kind()
-
-		if fieldKind == reflect.Struct || fieldKind == reflect.Map || fieldKind == reflect.Slice {
-			continue
-		}
-
-		if fieldKind == reflect.Int64 {
-			if _, ok := fieldValue.Interface().(time.Time); ok {
+	// Process fields of a struct value (skip nested structs and time.Time)
+	process := func(structValue reflect.Value) {
+		typ := structValue.Type()
+		for i := 0; i < typ.NumField(); i++ {
+			field, val := typ.Field(i), structValue.Field(i)
+			if !val.CanInterface() || field.Tag.Get("metrics") == "exclude" ||
+				val.Kind() == reflect.Map || val.Kind() == reflect.Slice ||
+				val.Kind() == reflect.Struct {
 				continue
 			}
-		}
-
-		name := field.Name
-
-		parts := strings.SplitSeq(tag, ",")
-		for part := range parts {
-			if after, ok := strings.CutPrefix(part, "label:"); ok {
-				name = after
-				break
+			if s := fmt.Sprint(val.Interface()); s != "" {
+				labels[getName(field)] = s
 			}
 		}
+	}
 
-		value := fmt.Sprint(fieldValue.Interface())
-		if value == "" {
-			continue
+	// Check if struct should be flattened (has inline tag or metrics:include)
+	shouldFlatten := func(structField reflect.StructField) bool {
+		return strings.Contains(structField.Tag.Get("json"), "inline") ||
+			strings.Contains(structField.Tag.Get("bson"), "inline") ||
+			structField.Tag.Get("metrics") == "include"
+	}
+
+	// outer first
+	process(value)
+
+	typ := value.Type()
+	for i := 0; i < typ.NumField(); i++ {
+		field, val := typ.Field(i), value.Field(i)
+		if val.Kind() == reflect.Struct && val.Type() != reflect.TypeFor[time.Time]() &&
+			shouldFlatten(field) {
+			// nested last (wins on collision)
+			process(reflect.Indirect(val))
 		}
-
-		labels[toSnakeCase(name)] = value
 	}
 
 	return labels
